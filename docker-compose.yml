@@ -1,0 +1,9 @@
+services:
+  yt-clips:
+    build: .
+    container_name: yt-clips
+    restart: unless-stopped
+    environment:
+      - CLIP_PASSWORD=${CLIP_PASSWORD}
+    volumes:
+      - ./clips:/app/clips

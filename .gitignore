@@ -1,0 +1,7 @@
+clips/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+deploy.sh

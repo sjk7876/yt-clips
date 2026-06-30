@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>yt-clips</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: #0f0f0f;
+  color: #e8e8e8;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 2.5rem 1rem;
+}
+
+header {
+  width: 100%;
+  max-width: 640px;
+  display: flex;
+  align-items: baseline;
+  gap: .5rem;
+  margin-bottom: 2rem;
+}
+
+h1 {
+  font-size: 1.5rem;
+  font-weight: 800;
+  letter-spacing: -.5px;
+}
+
+h1 em { color: #f97316; font-style: normal; }
+
+.sub {
+  font-size: .8rem;
+  color: #555;
+  font-weight: 500;
+}
+
+.card {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 16px;
+  padding: 1.75rem;
+  width: 100%;
+  max-width: 640px;
+  margin-bottom: 1.25rem;
+}
+
+label {
+  display: block;
+  font-size: .72rem;
+  font-weight: 700;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: .6px;
+  margin-bottom: .4rem;
+}
+
+input, select {
+  width: 100%;
+  padding: .7rem 1rem;
+  background: #111;
+  border: 1px solid #2e2e2e;
+  border-radius: 8px;
+  color: #eee;
+  font-size: .95rem;
+  outline: none;
+  transition: border-color .15s;
+  -webkit-appearance: none;
+}
+
+input:focus, select:focus { border-color: #f97316; }
+
+select {
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23666' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 2rem;
+}
+
+.field { margin-bottom: 1.2rem; }
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 140px;
+  gap: .85rem;
+  margin-bottom: 1.2rem;
+}
+
+.btn {
+  width: 100%;
+  padding: .85rem;
+  background: #f97316;
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  font-size: .95rem;
+  font-weight: 700;
+  cursor: pointer;
+  letter-spacing: .3px;
+  transition: background .15s, opacity .15s;
+}
+
+.btn:hover:not(:disabled) { background: #ea6c00; }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+
+/* Progress */
+.progress-wrap {
+  margin-top: 1.25rem;
+  display: none;
+}
+
+.progress-bar-bg {
+  height: 5px;
+  background: #222;
+  border-radius: 99px;
+  overflow: hidden;
+  margin-bottom: .5rem;
+}
+
+.progress-fill {
+  height: 100%;
+  background: #f97316;
+  border-radius: 99px;
+  transition: width .4s ease;
+  width: 0%;
+}
+
+.progress-fill.error { background: #555; }
+.progress-fill.done { background: #2ecc71; }
+
+.progress-text {
+  font-size: .78rem;
+  color: #666;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.progress-text.error-text { color: #f97316; }
+
+/* Section header */
+.section-title {
+  font-size: .7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: #444;
+  margin-bottom: 1rem;
+}
+
+/* Clip items */
+.clip-item {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: .85rem 1rem;
+  background: #111;
+  border: 1px solid #222;
+  border-radius: 8px;
+  margin-bottom: .5rem;
+  transition: border-color .15s;
+}
+
+.clip-item:hover { border-color: #333; }
+
+.clip-icon {
+  font-size: 1.1rem;
+  flex-shrink: 0;
+  opacity: .5;
+}
+
+.clip-meta { flex: 1; min-width: 0; }
+
+.clip-title {
+  font-size: .88rem;
+  font-weight: 600;
+  color: #ddd;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.clip-range {
+  font-size: .75rem;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  color: #666;
+  margin-top: .15rem;
+}
+
+.clip-url {
+  font-size: .72rem;
+  color: #555;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: .1rem;
+}
+
+.btn-dl {
+  padding: .4rem .85rem;
+  background: transparent;
+  border: 1px solid #333;
+  border-radius: 6px;
+  color: #999;
+  font-size: .78rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .1s, color .1s, border-color .1s;
+  text-decoration: none;
+  flex-shrink: 0;
+}
+
+.btn-dl:hover {
+  background: #222;
+  color: #eee;
+  border-color: #444;
+}
+
+.empty {
+  text-align: center;
+  color: #3a3a3a;
+  font-size: .85rem;
+  padding: 1.5rem;
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>yt<em>-</em>clips</h1>
+  <span class="sub">youtube VOD clipper</span>
+</header>
+
+<div class="card">
+  <div class="field">
+    <label>YouTube URL</label>
+    <input id="url" type="url" placeholder="https://www.youtube.com/watch?v=...">
+  </div>
+  <div class="row">
+    <div>
+      <label>Start</label>
+      <input id="start" type="text" placeholder="5:48">
+    </div>
+    <div>
+      <label>End</label>
+      <input id="end" type="text" placeholder="6:03">
+    </div>
+    <div>
+      <label>Quality</label>
+      <select id="quality">
+        <option value="1080">1080p</option>
+        <option value="720">720p</option>
+        <option value="480">480p</option>
+      </select>
+    </div>
+  </div>
+  <button class="btn" id="cut-btn" onclick="cutClip()">Cut Clip</button>
+
+  <div class="progress-wrap" id="prog-wrap">
+    <div class="progress-bar-bg">
+      <div class="progress-fill" id="prog-fill"></div>
+    </div>
+    <div class="progress-text" id="prog-text">Starting...</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="section-title">Recent Clips (24h)</div>
+  <div id="clips-list"><div class="empty">no clips yet</div></div>
+</div>
+
+<script>
+let pollTimer = null;
+
+async function cutClip() {
+  const url   = document.getElementById('url').value.trim();
+  const start = document.getElementById('start').value.trim();
+  const end   = document.getElementById('end').value.trim();
+  const qual  = document.getElementById('quality').value;
+
+  if (!url || !start || !end) return;
+
+  setBtn(false);
+  setProgress(2, 'Queuing job...', '');
+
+  try {
+    const res = await fetch('/api/clip', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({url, start, end, quality: qual}),
+    });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({detail: 'request failed'}));
+      throw new Error(e.detail || 'unknown error');
+    }
+    const {job_id} = await res.json();
+    pollTimer = setInterval(() => poll(job_id), 1000);
+  } catch(e) {
+    showError(e.message);
+    setBtn(true);
+  }
+}
+
+async function poll(jid) {
+  try {
+    const res = await fetch(`/api/status/${jid}`);
+    if (!res.ok) return;
+    const d = await res.json();
+
+    if (d.status === 'done') {
+      clearInterval(pollTimer);
+      setProgress(100, 'Done!', 'done');
+      setTimeout(() => {
+        window.location.href = `/api/download/${jid}`;
+        setTimeout(() => { hideProgress(); setBtn(true); loadClips(); }, 1500);
+      }, 400);
+    } else if (d.status === 'error') {
+      clearInterval(pollTimer);
+      showError(d.error || 'unknown error');
+      setBtn(true);
+    } else {
+      setProgress(d.pct || 0, d.progress || 'Processing...', '');
+    }
+  } catch(_) {}
+}
+
+function setProgress(pct, text, cls) {
+  document.getElementById('prog-wrap').style.display = 'block';
+  const fill = document.getElementById('prog-fill');
+  fill.style.width = pct + '%';
+  fill.className = 'progress-fill' + (cls ? ' ' + cls : '');
+  const pt = document.getElementById('prog-text');
+  pt.textContent = text;
+  pt.className = 'progress-text' + (cls === 'error' ? ' error-text' : '');
+}
+
+function showError(msg) {
+  setProgress(100, '✗ ' + msg, 'error');
+}
+
+function hideProgress() {
+  document.getElementById('prog-wrap').style.display = 'none';
+}
+
+function setBtn(enabled) {
+  document.getElementById('cut-btn').disabled = !enabled;
+}
+
+async function loadClips() {
+  try {
+    const res = await fetch('/api/clips');
+    if (!res.ok) return;
+    const clips = await res.json();
+    const el = document.getElementById('clips-list');
+
+    if (!clips.length) {
+      el.innerHTML = '<div class="empty">no clips yet</div>';
+      return;
+    }
+
+    el.innerHTML = clips.map(c => {
+      const title = c.title || extractId(c.url) || c.url;
+      return `
+        <div class="clip-item">
+          <div class="clip-icon">🎬</div>
+          <div class="clip-meta">
+            <div class="clip-title">${escHtml(title)}</div>
+            <div class="clip-range">${escHtml(c.start_raw)} → ${escHtml(c.end_raw)}</div>
+          </div>
+          <a class="btn-dl" href="/api/download/${c.job_id}">↓ download</a>
+        </div>`;
+    }).join('');
+  } catch(_) {}
+}
+
+function extractId(url) {
+  try {
+    const u = new URL(url);
+    return u.searchParams.get('v') || u.pathname.split('/').pop() || '';
+  } catch(_) { return ''; }
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+loadClips();
+</script>
+</body>
+</html>
