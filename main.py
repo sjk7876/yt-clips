@@ -368,4 +368,14 @@ async def download(job_id: str, request: Request):
     fp = CLIPS_DIR / j["filename"]
     if not fp.exists():
         raise HTTPException(404)
-    return FileResponse(str(fp), media_type="video/mp4", filename=j["filename"])
+    def _slug(s: str) -> str:
+        return re.sub(r'[^\w\s-]', '', s).strip().replace(' ', '_')[:60]
+
+    def _ts(t: str) -> str:
+        parts = t.split(':')
+        return (''.join(f"{p}{'hms'[i]}" for i, p in enumerate(parts)) if len(parts) == 3
+                else f"{parts[0]}m{parts[1]}s") if ':' in t else t
+
+    title = _slug(j.get('title') or 'clip')
+    dl_name = f"{title}_{_ts(j.get('start_raw',''))}-{_ts(j.get('end_raw',''))}.mp4"
+    return FileResponse(str(fp), media_type="video/mp4", filename=dl_name)

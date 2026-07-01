@@ -8,12 +8,15 @@ Download time-range clips from YouTube VODs in 1080p. Built for pulling volleyba
 
 ## Features
 
-- Paste a YouTube URL, set start/end timestamps, get an mp4
+- Paste a YouTube URL → embedded player loads instantly for scrubbing
+- **Mark Start / Mark End** buttons capture the current playback time
 - 1080p by default (720p / 480p available)
+- Downloads save as `Video_Title_5m48s-6m03s.mp4`
 - Password-protected with rate limiting (5 failed attempts / 60s per IP)
-- Clips auto-purge after 24 hours
+- Clips auto-purge after 24 hours; delete-all button for manual cleanup
 - Video title shown in recent clips list
 - Live encoding progress
+- yt-dlp auto-updates on every container start so YouTube changes don't break it
 
 ## Stack
 

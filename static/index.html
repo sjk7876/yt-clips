@@ -27,19 +27,9 @@ header {
   margin-bottom: 2rem;
 }
 
-h1 {
-  font-size: 1.5rem;
-  font-weight: 800;
-  letter-spacing: -.5px;
-}
-
+h1 { font-size: 1.5rem; font-weight: 800; letter-spacing: -.5px; }
 h1 em { color: #f97316; font-style: normal; }
-
-.sub {
-  font-size: .8rem;
-  color: #555;
-  font-weight: 500;
-}
+.sub { font-size: .8rem; color: #555; font-weight: 500; }
 
 .card {
   background: #1a1a1a;
@@ -86,6 +76,58 @@ select {
 
 .field { margin-bottom: 1.2rem; }
 
+/* YouTube player */
+.player-wrap {
+  display: none;
+  margin-bottom: 1rem;
+  border-radius: 8px;
+  overflow: hidden;
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #111;
+}
+
+.player-wrap iframe {
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+  border: 0;
+}
+
+.mark-btns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: .75rem;
+  margin-bottom: 1.2rem;
+}
+
+.btn-mark {
+  padding: .6rem;
+  background: transparent;
+  border: 1px solid #2e2e2e;
+  border-radius: 8px;
+  color: #888;
+  font-size: .82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color .15s, color .15s;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.btn-mark:hover { border-color: #f97316; color: #f97316; }
+
+.btn-mark .ts {
+  display: inline-block;
+  margin-left: .35rem;
+  color: #f97316;
+  opacity: 0;
+  transition: opacity .2s;
+}
+
+.btn-mark.marked .ts { opacity: 1; }
+
 .row {
   display: grid;
   grid-template-columns: 1fr 1fr 140px;
@@ -111,10 +153,7 @@ select {
 .btn:disabled { opacity: .4; cursor: not-allowed; }
 
 /* Progress */
-.progress-wrap {
-  margin-top: 1.25rem;
-  display: none;
-}
+.progress-wrap { margin-top: 1.25rem; display: none; }
 
 .progress-bar-bg {
   height: 5px;
@@ -144,9 +183,9 @@ select {
   text-overflow: ellipsis;
 }
 
-.progress-text.error-text { color: #f97316; }
+.progress-text.error-text { color: #e63946; }
 
-/* Section header */
+/* Clips section */
 .section-header {
   display: flex;
   align-items: center;
@@ -175,7 +214,6 @@ select {
 
 .btn-clear:hover { color: #e63946; }
 
-/* Clip items */
 .clip-item {
   display: flex;
   align-items: center;
@@ -189,13 +227,7 @@ select {
 }
 
 .clip-item:hover { border-color: #333; }
-
-.clip-icon {
-  font-size: 1.1rem;
-  flex-shrink: 0;
-  opacity: .5;
-}
-
+.clip-icon { font-size: 1.1rem; flex-shrink: 0; opacity: .5; }
 .clip-meta { flex: 1; min-width: 0; }
 
 .clip-title {
@@ -214,15 +246,6 @@ select {
   margin-top: .15rem;
 }
 
-.clip-url {
-  font-size: .72rem;
-  color: #555;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  margin-top: .1rem;
-}
-
 .btn-dl {
   padding: .4rem .85rem;
   background: transparent;
@@ -238,18 +261,9 @@ select {
   flex-shrink: 0;
 }
 
-.btn-dl:hover {
-  background: #222;
-  color: #eee;
-  border-color: #444;
-}
+.btn-dl:hover { background: #222; color: #eee; border-color: #444; }
 
-.empty {
-  text-align: center;
-  color: #3a3a3a;
-  font-size: .85rem;
-  padding: 1.5rem;
-}
+.empty { text-align: center; color: #3a3a3a; font-size: .85rem; padding: 1.5rem; }
 </style>
 </head>
 <body>
@@ -264,6 +278,20 @@ select {
     <label>YouTube URL</label>
     <input id="url" type="url" placeholder="https://www.youtube.com/watch?v=...">
   </div>
+
+  <div class="player-wrap" id="player-wrap">
+    <div id="yt-player"></div>
+  </div>
+
+  <div class="mark-btns" id="mark-btns" style="display:none">
+    <button class="btn-mark" id="mark-start" onclick="markStart()">
+      ◀ Mark Start <span class="ts" id="start-ts"></span>
+    </button>
+    <button class="btn-mark" id="mark-end" onclick="markEnd()">
+      Mark End ▶ <span class="ts" id="end-ts"></span>
+    </button>
+  </div>
+
   <div class="row">
     <div>
       <label>Start</label>
@@ -282,6 +310,7 @@ select {
       </select>
     </div>
   </div>
+
   <button class="btn" id="cut-btn" onclick="cutClip()">Cut Clip</button>
 
   <div class="progress-wrap" id="prog-wrap">
@@ -300,7 +329,104 @@ select {
   <div id="clips-list"><div class="empty">no clips yet</div></div>
 </div>
 
+<script src="https://www.youtube.com/iframe_api"></script>
 <script>
+// ── YouTube player ──────────────────────────────────────────────────────────
+
+var ytPlayer = null;
+var pendingVideoId = null;
+
+function onYouTubeIframeAPIReady() {
+  if (pendingVideoId) {
+    _createPlayer(pendingVideoId);
+    pendingVideoId = null;
+  }
+}
+
+function _createPlayer(videoId) {
+  ytPlayer = new YT.Player('yt-player', {
+    videoId: videoId,
+    playerVars: { playsinline: 1, controls: 1, rel: 0 },
+    events: {
+      onError: function() {
+        document.getElementById('player-wrap').style.display = 'none';
+        document.getElementById('mark-btns').style.display = 'none';
+      }
+    }
+  });
+}
+
+function loadVideo(videoId) {
+  document.getElementById('player-wrap').style.display = 'block';
+  document.getElementById('mark-btns').style.display = 'grid';
+  if (ytPlayer && ytPlayer.loadVideoById) {
+    ytPlayer.loadVideoById(videoId);
+  } else if (typeof YT !== 'undefined' && YT.Player) {
+    _createPlayer(videoId);
+  } else {
+    pendingVideoId = videoId;
+  }
+}
+
+function extractVideoId(url) {
+  try {
+    const u = new URL(url.trim());
+    if (u.hostname.includes('youtu.be')) return u.pathname.slice(1).split('?')[0];
+    if (u.hostname.includes('youtube.com')) {
+      if (u.pathname.startsWith('/live/')) return u.pathname.split('/')[2];
+      return u.searchParams.get('v');
+    }
+  } catch(_) {}
+  return null;
+}
+
+function fmtTime(sec) {
+  sec = Math.floor(sec);
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  return `${m}:${String(s).padStart(2,'0')}`;
+}
+
+function markStart() {
+  if (!ytPlayer || !ytPlayer.getCurrentTime) return;
+  const t = fmtTime(ytPlayer.getCurrentTime());
+  document.getElementById('start').value = t;
+  document.getElementById('start-ts').textContent = t;
+  document.getElementById('mark-start').classList.add('marked');
+}
+
+function markEnd() {
+  if (!ytPlayer || !ytPlayer.getCurrentTime) return;
+  const t = fmtTime(ytPlayer.getCurrentTime());
+  document.getElementById('end').value = t;
+  document.getElementById('end-ts').textContent = t;
+  document.getElementById('mark-end').classList.add('marked');
+}
+
+let urlDebounce = null;
+document.getElementById('url').addEventListener('input', function() {
+  clearTimeout(urlDebounce);
+  urlDebounce = setTimeout(() => {
+    const vid = extractVideoId(this.value);
+    if (vid) {
+      loadVideo(vid);
+    } else {
+      document.getElementById('player-wrap').style.display = 'none';
+      document.getElementById('mark-btns').style.display = 'none';
+    }
+  }, 500);
+});
+
+document.getElementById('url').addEventListener('paste', function() {
+  clearTimeout(urlDebounce);
+  setTimeout(() => {
+    const vid = extractVideoId(this.value);
+    if (vid) loadVideo(vid);
+  }, 50);
+});
+
+// ── Clip job ────────────────────────────────────────────────────────────────
+
 let pollTimer = null;
 
 async function cutClip() {
@@ -372,17 +498,11 @@ function setProgress(pct, text, cls) {
   pt.className = 'progress-text' + (cls === 'error' ? ' error-text' : '');
 }
 
-function showError(msg) {
-  setProgress(100, '✗ ' + msg, 'error');
-}
+function showError(msg) { setProgress(100, '✗ ' + msg, 'error'); }
+function hideProgress() { document.getElementById('prog-wrap').style.display = 'none'; }
+function setBtn(enabled) { document.getElementById('cut-btn').disabled = !enabled; }
 
-function hideProgress() {
-  document.getElementById('prog-wrap').style.display = 'none';
-}
-
-function setBtn(enabled) {
-  document.getElementById('cut-btn').disabled = !enabled;
-}
+// ── Clips list ───────────────────────────────────────────────────────────────
 
 async function loadClips() {
   try {
@@ -390,36 +510,17 @@ async function loadClips() {
     if (!res.ok) return;
     const clips = await res.json();
     const el = document.getElementById('clips-list');
-
-    if (!clips.length) {
-      el.innerHTML = '<div class="empty">no clips yet</div>';
-      return;
-    }
-
-    el.innerHTML = clips.map(c => {
-      const title = c.title || extractId(c.url) || c.url;
-      return `
-        <div class="clip-item">
-          <div class="clip-icon">🎬</div>
-          <div class="clip-meta">
-            <div class="clip-title">${escHtml(title)}</div>
-            <div class="clip-range">${escHtml(c.start_raw)} → ${escHtml(c.end_raw)}</div>
-          </div>
-          <a class="btn-dl" href="/api/download/${c.job_id}">↓ download</a>
-        </div>`;
-    }).join('');
+    if (!clips.length) { el.innerHTML = '<div class="empty">no clips yet</div>'; return; }
+    el.innerHTML = clips.map(c => `
+      <div class="clip-item">
+        <div class="clip-icon">🎬</div>
+        <div class="clip-meta">
+          <div class="clip-title">${escHtml(c.title || extractVideoId(c.url) || c.url)}</div>
+          <div class="clip-range">${escHtml(c.start_raw)} → ${escHtml(c.end_raw)}</div>
+        </div>
+        <a class="btn-dl" href="/api/download/${c.job_id}">↓ download</a>
+      </div>`).join('');
   } catch(_) {}
-}
-
-function extractId(url) {
-  try {
-    const u = new URL(url);
-    return u.searchParams.get('v') || u.pathname.split('/').pop() || '';
-  } catch(_) { return ''; }
-}
-
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 async function clearClips() {
@@ -430,6 +531,10 @@ async function clearClips() {
   await loadClips();
   btn.textContent = 'delete all';
   btn.disabled = false;
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 loadClips();
