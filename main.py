@@ -325,7 +325,8 @@ _LOGIN_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>yt-clips</title>
+<title>YouTube Clipper</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0f0f0f;color:#e8e8e8;font-family:system-ui,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center}
@@ -366,7 +367,8 @@ _ADMIN_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>yt-clips · admin</title>
+<title>YouTube Clipper · admin</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0f0f0f;color:#e8e8e8;font-family:system-ui,sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:2.5rem 1rem}
@@ -563,7 +565,8 @@ _SETTINGS_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>yt-clips · settings</title>
+<title>YouTube Clipper · settings</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0f0f0f;color:#e8e8e8;font-family:system-ui,sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:2.5rem 1rem}
@@ -699,7 +702,8 @@ _REGISTER_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>yt-clips · request account</title>
+<title>YouTube Clipper · request account</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0f0f0f;color:#e8e8e8;font-family:system-ui,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center}
@@ -768,6 +772,13 @@ function showMsg(text, type) {
 }
 </script>
 </body></html>"""
+
+
+# ── Static assets ─────────────────────────────────────────────────────────────
+
+@app.get("/favicon.svg")
+async def favicon():
+    return FileResponse(str(BASE / "static" / "favicon.svg"), media_type="image/svg+xml")
 
 
 # ── Auth routes ───────────────────────────────────────────────────────────────
