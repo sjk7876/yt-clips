@@ -598,7 +598,7 @@ async def list_all_clips(request: Request):
         return [
             {"job_id": k, "title": v.get("title"), "start_raw": v.get("start_raw"),
              "end_raw": v.get("end_raw"), "url": v.get("url"),
-             "created_at": v["created_at"], "owner": v.get("owner")}
+             "created_at": v["created_at"], "owner": v.get("owner") or ADMIN_USER}
             for k, v in sorted(jobs.items(), key=lambda x: -x[1]["created_at"])
             if v["status"] == "done"
         ]
