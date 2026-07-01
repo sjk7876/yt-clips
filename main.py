@@ -8,9 +8,10 @@ app = FastAPI()
 BASE = Path(__file__).parent
 CLIPS_DIR = BASE / "clips"
 CLIPS_DIR.mkdir(exist_ok=True)
-JOBS_FILE     = CLIPS_DIR / "jobs.json"
-USERS_FILE    = CLIPS_DIR / "users.json"
-SETTINGS_FILE = CLIPS_DIR / "settings.json"
+JOBS_FILE      = CLIPS_DIR / "jobs.json"
+USERS_FILE     = CLIPS_DIR / "users.json"
+SETTINGS_FILE  = CLIPS_DIR / "settings.json"
+REQUESTS_FILE  = CLIPS_DIR / "requests.json"
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -67,6 +68,29 @@ def _get_user(request: Request):
 def _get_role(username: str) -> str:
     with _users_lock:
         return users.get(username, {}).get("role", "user")
+
+
+# ── Registration requests ─────────────────────────────────────────────────────
+
+reg_requests: list = []
+_req_lock = threading.Lock()
+
+
+def _load_requests() -> None:
+    if REQUESTS_FILE.exists():
+        try:
+            with _req_lock:
+                reg_requests.extend(json.loads(REQUESTS_FILE.read_text()))
+        except Exception:
+            pass
+
+
+def _save_requests() -> None:
+    try:
+        with _req_lock:
+            REQUESTS_FILE.write_text(json.dumps(reg_requests, indent=2))
+    except Exception:
+        pass
 
 
 # ── Settings ─────────────────────────────────────────────────────────────────
@@ -289,6 +313,7 @@ def _cleanup_orphans() -> None:
 
 _load_settings()
 _load_users()
+_load_requests()
 _load_jobs()
 _cleanup_orphans()
 threading.Thread(target=_cleanup, daemon=True).start()
@@ -324,6 +349,7 @@ input:focus{border-color:#f97316}
   <label>Password</label>
   <input id="pw" type="password" placeholder="password" onkeydown="if(event.key==='Enter')go()">
   <button class="btn" onclick="go()">enter</button>
+  <p style="text-align:center;margin-top:1.25rem;font-size:.8rem"><a href="/register" style="color:#555;text-decoration:none">request account →</a></p>
 </div>
 <script>
 async function go(){
@@ -369,6 +395,14 @@ select{cursor:pointer;background-image:url("data:image/svg+xml,%3Csvg xmlns='htt
 .storage-bar-fill{height:100%;background:#f97316;border-radius:99px;transition:width .4s;width:0%}
 .storage-bar-fill.warn{background:#e63946}
 .storage-label{font-size:.82rem;color:#666}
+.req-row{display:flex;align-items:center;gap:.75rem;padding:.7rem .9rem;background:#111;border:1px solid #222;border-radius:8px;margin-bottom:.5rem}
+.req-name{flex:1}
+.req-name strong{font-weight:600;font-size:.9rem}
+.req-name span{font-size:.75rem;color:#555;display:block;margin-top:.1rem}
+.btn-approve{padding:.35rem .75rem;background:#f9731622;border:1px solid #f97316;border-radius:6px;color:#f97316;font-size:.75rem;font-weight:600;cursor:pointer;transition:all .15s}
+.btn-approve:hover{background:#f97316;color:#fff}
+.btn-reject{padding:.35rem .75rem;background:transparent;border:1px solid #333;border-radius:6px;color:#666;font-size:.75rem;font-weight:600;cursor:pointer;transition:all .15s;margin-left:.25rem}
+.btn-reject:hover{border-color:#e63946;color:#e63946}
 </style>
 </head>
 <body>
@@ -376,6 +410,11 @@ select{cursor:pointer;background-image:url("data:image/svg+xml,%3Csvg xmlns='htt
   <h1>yt<em>-</em>clips</h1>
   <a class="back" href="/">← back</a>
 </header>
+
+<div class="card">
+  <div class="card-title">Pending Requests <span id="req-badge" style="display:none;background:#f97316;color:#fff;font-size:.65rem;padding:.1rem .45rem;border-radius:4px;margin-left:.35rem;vertical-align:middle;font-weight:700"></span></div>
+  <div id="req-list"></div>
+</div>
 
 <div class="card">
   <div class="card-title">Users</div>
@@ -478,9 +517,255 @@ async function saveLimit() {
   setTimeout(() => msg.style.display = 'none', 2000);
 }
 
+async function loadRequests() {
+  const r = await fetch('/api/admin/requests');
+  if (!r.ok) return;
+  const list = await r.json();
+  const el = document.getElementById('req-list');
+  const badge = document.getElementById('req-badge');
+  if (!list.length) {
+    el.innerHTML = '<div style="color:#444;font-size:.85rem;padding:.5rem">no pending requests</div>';
+    badge.style.display = 'none';
+  } else {
+    badge.textContent = list.length;
+    badge.style.display = 'inline';
+    el.innerHTML = list.map(req => `
+      <div class="req-row">
+        <div class="req-name">
+          <strong>${esc(req.username)}</strong>
+          ${req.display_name ? `<span>${esc(req.display_name)}</span>` : ''}
+        </div>
+        <button class="btn-approve" onclick="approveReq('${esc(req.id)}')">approve</button>
+        <button class="btn-reject" onclick="rejectReq('${esc(req.id)}')">reject</button>
+      </div>`).join('');
+  }
+}
+
+async function approveReq(id) {
+  await fetch('/api/admin/requests/' + id + '/approve', {method:'POST'});
+  loadRequests(); loadUsers();
+}
+
+async function rejectReq(id) {
+  await fetch('/api/admin/requests/' + id, {method:'DELETE'});
+  loadRequests();
+}
+
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+loadRequests();
 loadUsers();
 loadStorage();
+</script>
+</body></html>"""
+
+
+_SETTINGS_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>yt-clips · settings</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f0f0f;color:#e8e8e8;font-family:system-ui,sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:2.5rem 1rem}
+header{width:100%;max-width:480px;display:flex;align-items:baseline;gap:.75rem;margin-bottom:2rem}
+h1{font-size:1.4rem;font-weight:800;letter-spacing:-.5px}
+h1 em{color:#f97316;font-style:normal}
+.back{font-size:.8rem;color:#555;text-decoration:none}
+.back:hover{color:#999}
+.card{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:16px;padding:1.75rem;width:100%;max-width:480px;margin-bottom:1.25rem}
+.card-title{font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#444;margin-bottom:1.25rem}
+label{display:block;font-size:.7rem;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.6px;margin-bottom:.35rem}
+input{width:100%;padding:.65rem .9rem;background:#111;border:1px solid #2e2e2e;border-radius:8px;color:#eee;font-size:.9rem;margin-bottom:.9rem;outline:none;transition:border-color .15s}
+input:focus{border-color:#f97316}
+input[readonly]{color:#555;cursor:default}
+.btn{width:100%;padding:.75rem;background:#f97316;border:none;border-radius:8px;color:#fff;font-size:.9rem;font-weight:700;cursor:pointer;transition:background .15s}
+.btn:hover{background:#ea6c00}
+.msg{font-size:.8rem;margin-top:.75rem;text-align:center;display:none}
+.msg.ok{color:#2ecc71}.msg.err{color:#e63946}
+.note{font-size:.78rem;color:#555;margin-bottom:.9rem;line-height:1.5}
+</style>
+</head>
+<body>
+<header>
+  <h1>yt<em>-</em>clips</h1>
+  <a class="back" href="/">← back</a>
+</header>
+
+<div class="card">
+  <div class="card-title">Display Name</div>
+  <p class="note">shown as your name in the All Clips view. leave blank to show your username.</p>
+  <label>Display Name</label>
+  <input id="display-name" type="text" placeholder="e.g. Spencer">
+  <button class="btn" onclick="saveDisplayName()">Save Display Name</button>
+  <div class="msg" id="dn-msg"></div>
+</div>
+
+<div class="card">
+  <div class="card-title">Username</div>
+  <p class="note">changing your username will log you out — you'll need to sign back in.</p>
+  <label>Current Username</label>
+  <input id="cur-un" type="text" readonly>
+  <label>New Username</label>
+  <input id="new-un" type="text" placeholder="letters, numbers, hyphens, underscores">
+  <label>Current Password (to confirm)</label>
+  <input id="un-pw" type="password" placeholder="your current password">
+  <button class="btn" onclick="changeUsername()">Save Username</button>
+  <div class="msg" id="un-msg"></div>
+</div>
+
+<div class="card">
+  <div class="card-title">Password</div>
+  <label>Current Password</label>
+  <input id="old-pw" type="password" placeholder="current password">
+  <label>New Password</label>
+  <input id="new-pw" type="password" placeholder="new password">
+  <label>Confirm New Password</label>
+  <input id="conf-pw" type="password" placeholder="confirm new password" onkeydown="if(event.key==='Enter')changePassword()">
+  <button class="btn" onclick="changePassword()">Save Password</button>
+  <div class="msg" id="pw-msg"></div>
+</div>
+
+<script>
+async function loadMe() {
+  const r = await fetch('/api/me');
+  if (!r.ok) { location.href='/login'; return; }
+  const d = await r.json();
+  document.getElementById('cur-un').value = d.username;
+  document.getElementById('new-un').value = d.username;
+  document.getElementById('display-name').value = d.display_name || '';
+}
+
+async function saveDisplayName() {
+  const val = document.getElementById('display-name').value.trim();
+  const r = await fetch('/api/me/display_name', {
+    method:'PUT', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({display_name: val})
+  });
+  showMsg('dn-msg', r.ok ? 'saved' : 'error', r.ok ? 'ok' : 'err');
+}
+
+async function changeUsername() {
+  const newUn = document.getElementById('new-un').value.trim().toLowerCase();
+  const pw    = document.getElementById('un-pw').value;
+  const curUn = document.getElementById('cur-un').value;
+  if (!newUn || !pw) { showMsg('un-msg', 'all fields required', 'err'); return; }
+  if (newUn === curUn) { showMsg('un-msg', 'that is already your username', 'err'); return; }
+  const r = await fetch('/api/me/username', {
+    method:'PUT', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({username: newUn, password: pw})
+  });
+  const d = await r.json().catch(()=>({}));
+  if (r.ok && d.ok) {
+    showMsg('un-msg', 'updated — signing you out', 'ok');
+    setTimeout(()=>{ location.href='/login'; }, 1500);
+  } else {
+    showMsg('un-msg', d.error || d.detail || 'error', 'err');
+  }
+}
+
+async function changePassword() {
+  const old = document.getElementById('old-pw').value;
+  const nw  = document.getElementById('new-pw').value;
+  const cf  = document.getElementById('conf-pw').value;
+  if (!old || !nw) { showMsg('pw-msg', 'all fields required', 'err'); return; }
+  if (nw !== cf)   { showMsg('pw-msg', "passwords don't match", 'err'); return; }
+  const r = await fetch('/api/me/password', {
+    method:'PUT', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({current_password: old, new_password: nw})
+  });
+  const d = await r.json().catch(()=>({}));
+  if (r.ok && d.ok) {
+    showMsg('pw-msg', 'password updated', 'ok');
+    document.getElementById('old-pw').value='';
+    document.getElementById('new-pw').value='';
+    document.getElementById('conf-pw').value='';
+  } else {
+    showMsg('pw-msg', d.error || d.detail || 'error', 'err');
+  }
+}
+
+function showMsg(id, text, type) {
+  const el = document.getElementById(id);
+  el.textContent = text; el.className = 'msg ' + type; el.style.display = 'block';
+  setTimeout(()=>el.style.display='none', 3000);
+}
+
+loadMe();
+</script>
+</body></html>"""
+
+
+_REGISTER_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>yt-clips · request account</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f0f0f;color:#e8e8e8;font-family:system-ui,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:16px;padding:2rem;width:360px}
+h1{font-size:1.4rem;font-weight:800;margin-bottom:.4rem;letter-spacing:-.5px}
+h1 em{color:#f97316;font-style:normal}
+.sub{font-size:.82rem;color:#555;margin-bottom:1.75rem;line-height:1.5}
+label{display:block;font-size:.7rem;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.6px;margin-bottom:.35rem}
+input{width:100%;padding:.7rem 1rem;background:#111;border:1px solid #2e2e2e;border-radius:8px;color:#eee;font-size:1rem;margin-bottom:1rem;outline:none;transition:border-color .15s}
+input:focus{border-color:#f97316}
+.btn{width:100%;padding:.8rem;background:#f97316;border:none;border-radius:8px;color:#fff;font-size:1rem;font-weight:700;cursor:pointer;transition:background .15s}
+.btn:hover:not([disabled]){background:#ea6c00}
+.btn[disabled]{background:#444;cursor:not-allowed}
+.msg{font-size:.82rem;margin-top:.75rem;text-align:center;display:none;line-height:1.5}
+.msg.ok{color:#2ecc71}.msg.err{color:#e63946}
+.login-link{text-align:center;margin-top:1.25rem;font-size:.8rem}
+.login-link a{color:#555;text-decoration:none}
+.login-link a:hover{color:#999}
+.opt{color:#444;font-weight:400;text-transform:none;letter-spacing:0}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>yt<em>-</em>clips</h1>
+  <p class="sub">request an account — an admin will approve it before you can log in</p>
+  <label>Username</label>
+  <input id="un" type="text" placeholder="letters, numbers, hyphens" autocomplete="username">
+  <label>Display Name <span class="opt">(optional)</span></label>
+  <input id="dn" type="text" placeholder="your name, e.g. Spencer">
+  <label>Password</label>
+  <input id="pw" type="password" placeholder="password" autocomplete="new-password">
+  <label>Confirm Password</label>
+  <input id="cpw" type="password" placeholder="confirm password" autocomplete="new-password" onkeydown="if(event.key==='Enter')submit()">
+  <button class="btn" id="submit-btn" onclick="submit()">Request Account</button>
+  <div class="msg" id="msg"></div>
+  <div class="login-link"><a href="/login">← back to login</a></div>
+</div>
+<script>
+async function submit() {
+  const un  = document.getElementById('un').value.trim().toLowerCase();
+  const dn  = document.getElementById('dn').value.trim();
+  const pw  = document.getElementById('pw').value;
+  const cpw = document.getElementById('cpw').value;
+  const btn = document.getElementById('submit-btn');
+  if (!un || !pw) { showMsg('username and password required', 'err'); return; }
+  if (pw !== cpw) { showMsg("passwords don't match", 'err'); return; }
+  btn.disabled = true;
+  const r = await fetch('/api/register', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({username:un, display_name:dn, password:pw})
+  });
+  btn.disabled = false;
+  const d = await r.json().catch(()=>({}));
+  if (r.ok) {
+    showMsg('request submitted — an admin will review it', 'ok');
+    ['un','dn','pw','cpw'].forEach(id=>document.getElementById(id).value='');
+    btn.style.display='none';
+  } else {
+    showMsg(d.detail || 'error submitting request', 'err');
+  }
+}
+function showMsg(text, type) {
+  const el=document.getElementById('msg');
+  el.textContent=text; el.className='msg '+type; el.style.display='block';
+  if(type==='err') setTimeout(()=>el.style.display='none', 4000);
+}
 </script>
 </body></html>"""
 
@@ -523,7 +808,9 @@ async def me(request: Request):
     username = _get_user(request)
     if not username:
         raise HTTPException(401)
-    return {"username": username, "role": _get_role(username)}
+    with _users_lock:
+        display_name = users.get(username, {}).get("display_name", "")
+    return {"username": username, "role": _get_role(username), "display_name": display_name}
 
 
 # ── Main app ──────────────────────────────────────────────────────────────────
@@ -594,11 +881,14 @@ async def list_clips(request: Request):
 async def list_all_clips(request: Request):
     if not _get_user(request):
         raise HTTPException(401)
+    with _users_lock:
+        display_names = {k: v.get("display_name") or k for k, v in users.items()}
     with _lock:
         return [
             {"job_id": k, "title": v.get("title"), "start_raw": v.get("start_raw"),
              "end_raw": v.get("end_raw"), "url": v.get("url"),
-             "created_at": v["created_at"], "owner": v.get("owner") or ADMIN_USER}
+             "created_at": v["created_at"], "owner": v.get("owner") or ADMIN_USER,
+             "owner_display": display_names.get(v.get("owner") or ADMIN_USER) or (v.get("owner") or ADMIN_USER)}
             for k, v in sorted(jobs.items(), key=lambda x: -x[1]["created_at"])
             if v["status"] == "done"
         ]
@@ -728,4 +1018,166 @@ async def admin_delete_user(target: str, request: Request):
             raise HTTPException(404)
         del users[target]
     _save_users()
+    return {"ok": True}
+
+
+# ── Profile / account self-service ────────────────────────────────────────────
+
+@app.get("/settings", response_class=HTMLResponse)
+async def settings_page(request: Request):
+    if not _get_user(request):
+        return RedirectResponse("/login")
+    return _SETTINGS_HTML
+
+
+@app.put("/api/me/display_name")
+async def update_display_name(request: Request):
+    username = _get_user(request)
+    if not username:
+        raise HTTPException(401)
+    data = await request.json()
+    display_name = data.get("display_name", "").strip()
+    with _users_lock:
+        if username not in users:
+            raise HTTPException(404)
+        users[username]["display_name"] = display_name
+    _save_users()
+    return {"ok": True}
+
+
+@app.put("/api/me/username")
+async def update_username(request: Request):
+    username = _get_user(request)
+    if not username:
+        raise HTTPException(401)
+    data = await request.json()
+    new_username = data.get("username", "").strip().lower()
+    password = data.get("password", "")
+    if not new_username:
+        raise HTTPException(400, "username required")
+    with _users_lock:
+        user_data = dict(users.get(username, {}))
+    if _hash_pw(username, password) != user_data.get("password_hash"):
+        return JSONResponse({"ok": False, "error": "wrong password"}, status_code=401)
+    if new_username == username:
+        return JSONResponse({"ok": True, "username": username})
+    with _users_lock:
+        if new_username in users:
+            raise HTTPException(409, "username already taken")
+        new_hash = _hash_pw(new_username, password)
+        users[new_username] = {**user_data, "password_hash": new_hash}
+        del users[username]
+    _save_users()
+    with _lock:
+        for v in jobs.values():
+            if v.get("owner") == username:
+                v["owner"] = new_username
+    _save_jobs()
+    new_token = _session_token(new_username, new_hash)
+    r = JSONResponse({"ok": True, "username": new_username})
+    r.set_cookie("auth", new_token, httponly=True, samesite="lax", max_age=86400 * 30)
+    return r
+
+
+@app.put("/api/me/password")
+async def update_password(request: Request):
+    username = _get_user(request)
+    if not username:
+        raise HTTPException(401)
+    data = await request.json()
+    current_pw = data.get("current_password", "")
+    new_pw = data.get("new_password", "")
+    if not new_pw:
+        raise HTTPException(400, "new_password required")
+    with _users_lock:
+        user_data = dict(users.get(username, {}))
+    if _hash_pw(username, current_pw) != user_data.get("password_hash"):
+        return JSONResponse({"ok": False, "error": "wrong current password"}, status_code=401)
+    new_hash = _hash_pw(username, new_pw)
+    with _users_lock:
+        users[username]["password_hash"] = new_hash
+    _save_users()
+    new_token = _session_token(username, new_hash)
+    r = JSONResponse({"ok": True})
+    r.set_cookie("auth", new_token, httponly=True, samesite="lax", max_age=86400 * 30)
+    return r
+
+
+# ── Registration request flow ─────────────────────────────────────────────────
+
+@app.get("/register", response_class=HTMLResponse)
+async def register_page():
+    return _REGISTER_HTML
+
+
+@app.post("/api/register")
+async def submit_registration(request: Request):
+    data = await request.json()
+    username = data.get("username", "").strip().lower()
+    display_name = data.get("display_name", "").strip()
+    password = data.get("password", "")
+    if not username or not password:
+        raise HTTPException(400, "username and password required")
+    if not re.match(r'^[a-z0-9_-]{2,}$', username):
+        raise HTTPException(400, "username must be 2+ chars: letters, numbers, hyphens, underscores")
+    with _users_lock:
+        if username in users:
+            raise HTTPException(409, "username already taken")
+    with _req_lock:
+        if any(r["username"] == username for r in reg_requests):
+            raise HTTPException(409, "a request for that username is already pending")
+    req = {
+        "id": str(uuid.uuid4()),
+        "username": username,
+        "display_name": display_name,
+        "password_hash": _hash_pw(username, password),
+        "requested_at": time.time(),
+    }
+    with _req_lock:
+        reg_requests.append(req)
+    _save_requests()
+    return {"ok": True}
+
+
+@app.get("/api/admin/requests")
+async def admin_list_requests(request: Request):
+    if _get_role(_get_user(request) or "") != "admin":
+        raise HTTPException(403)
+    with _req_lock:
+        return list(reg_requests)
+
+
+@app.post("/api/admin/requests/{req_id}/approve")
+async def admin_approve_request(req_id: str, request: Request):
+    if _get_role(_get_user(request) or "") != "admin":
+        raise HTTPException(403)
+    with _req_lock:
+        req = next((r for r in reg_requests if r["id"] == req_id), None)
+    if not req:
+        raise HTTPException(404, "request not found")
+    with _users_lock:
+        if req["username"] in users:
+            raise HTTPException(409, "username already taken")
+        users[req["username"]] = {
+            "password_hash": req["password_hash"],
+            "role": "user",
+            "display_name": req.get("display_name", ""),
+        }
+    _save_users()
+    with _req_lock:
+        reg_requests[:] = [r for r in reg_requests if r["id"] != req_id]
+    _save_requests()
+    return {"ok": True}
+
+
+@app.delete("/api/admin/requests/{req_id}")
+async def admin_reject_request(req_id: str, request: Request):
+    if _get_role(_get_user(request) or "") != "admin":
+        raise HTTPException(403)
+    with _req_lock:
+        before = len(reg_requests)
+        reg_requests[:] = [r for r in reg_requests if r["id"] != req_id]
+        if len(reg_requests) == before:
+            raise HTTPException(404, "request not found")
+    _save_requests()
     return {"ok": True}

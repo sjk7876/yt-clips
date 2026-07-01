@@ -14,9 +14,11 @@ Download time-range clips from YouTube VODs in 1080p. Built for pulling volleyba
 - Downloads save as `Video_Title_5m48s-6m03s.mp4`
 - Multi-user accounts — each person has their own login
 - **Mine** tab shows your clips; **All** tab shows everyone's (with owner label)
-- `/admin` page to add and remove users (admin only)
+- **Account requests** — "Request account" link on the login page; admin approves or rejects from `/admin`
+- `/settings` page — change display name, username, or password
+- `/admin` page — manage users, approve account requests, configure storage (admin only)
 - Rate limiting on login (5 failed attempts / 60s per IP)
-- Clips auto-purge after 24 hours; delete-all button for manual cleanup
+- Storage-based retention — configurable cap (default 20 GB); oldest clips purged when limit hit; delete-all button for manual cleanup
 - Video title shown in recent clips list
 - Live encoding progress
 - yt-dlp auto-updates on every container start so YouTube changes don't break it

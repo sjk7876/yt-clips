@@ -332,6 +332,7 @@ select {
   <span class="sub">youtube VOD clipper</span>
   <div class="user-bar">
     <span id="username-display"></span>
+    <a href="/settings">settings</a>
     <a href="/admin" id="admin-link" style="display:none">admin</a>
     <button class="btn-logout" onclick="logout()">logout</button>
   </div>
@@ -576,7 +577,7 @@ async function initUser() {
   const r = await fetch('/api/me');
   if (!r.ok) { location.href = '/login'; return; }
   const u = await r.json();
-  document.getElementById('username-display').textContent = u.username;
+  document.getElementById('username-display').textContent = u.display_name || u.username;
   if (u.role === 'admin') document.getElementById('admin-link').style.display = 'inline';
 }
 
@@ -606,7 +607,7 @@ function renderClips(containerId, clips, showOwner) {
       <div class="clip-icon">🎬</div>
       <div class="clip-meta">
         <div class="clip-title">${escHtml(c.title || extractVideoId(c.url) || c.url)}</div>
-        <div class="clip-range">${escHtml(c.start_raw)} → ${escHtml(c.end_raw)}${showOwner && c.owner ? ` · <span class="clip-owner">${escHtml(c.owner)}</span>` : ''}</div>
+        <div class="clip-range">${escHtml(c.start_raw)} → ${escHtml(c.end_raw)}${showOwner && c.owner ? ` · <span class="clip-owner">${escHtml(c.owner_display || c.owner)}</span>` : ''}</div>
       </div>
       <a class="btn-dl" href="/api/download/${c.job_id}">↓ download</a>
     </div>`).join('');
