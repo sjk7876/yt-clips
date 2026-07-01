@@ -8,8 +8,9 @@ app = FastAPI()
 BASE = Path(__file__).parent
 CLIPS_DIR = BASE / "clips"
 CLIPS_DIR.mkdir(exist_ok=True)
-JOBS_FILE  = CLIPS_DIR / "jobs.json"
-USERS_FILE = CLIPS_DIR / "users.json"
+JOBS_FILE     = CLIPS_DIR / "jobs.json"
+USERS_FILE    = CLIPS_DIR / "users.json"
+SETTINGS_FILE = CLIPS_DIR / "settings.json"
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -66,6 +67,52 @@ def _get_user(request: Request):
 def _get_role(username: str) -> str:
     with _users_lock:
         return users.get(username, {}).get("role", "user")
+
+
+# ── Settings ─────────────────────────────────────────────────────────────────
+
+settings: dict = {"storage_limit_gb": 20}
+
+
+def _load_settings() -> None:
+    if SETTINGS_FILE.exists():
+        try:
+            settings.update(json.loads(SETTINGS_FILE.read_text()))
+        except Exception:
+            pass
+
+
+def _save_settings() -> None:
+    try:
+        SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
+    except Exception:
+        pass
+
+
+def _storage_bytes() -> int:
+    return sum(f.stat().st_size for f in CLIPS_DIR.glob("*.mp4") if f.exists())
+
+
+def _enforce_storage_limit() -> None:
+    limit = int(settings.get("storage_limit_gb", 20) * 1024 ** 3)
+    used = _storage_bytes()
+    if used <= limit:
+        return
+    with _lock:
+        candidates = sorted(
+            [(k, v) for k, v in jobs.items() if v["status"] == "done" and v.get("filename")],
+            key=lambda x: x[1]["created_at"]
+        )
+    for jid, j in candidates:
+        if used <= limit:
+            break
+        fp = CLIPS_DIR / j["filename"]
+        if fp.exists():
+            used -= fp.stat().st_size
+            fp.unlink(missing_ok=True)
+        with _lock:
+            jobs.pop(jid, None)
+    _save_jobs()
 
 
 # ── Jobs ──────────────────────────────────────────────────────────────────────
@@ -202,6 +249,7 @@ def _worker(job_id: str, url: str, start: str, end: str, quality: str):
                 with _lock:
                     jobs[job_id].update(status="done", filename=found[0].name, pct=100, progress="Done")
                 _save_jobs()
+                _enforce_storage_limit()
             else:
                 with _lock:
                     jobs[job_id].update(status="error", error="output file not found after download")
@@ -216,17 +264,16 @@ def _worker(job_id: str, url: str, start: str, end: str, quality: str):
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 
 def _cleanup():
+    """Hourly: remove job entries whose files have gone missing."""
     while True:
         time.sleep(3600)
-        cutoff = time.time() - 86400
         with _lock:
-            old = [k for k, v in jobs.items() if v["created_at"] < cutoff]
-        for k in old:
-            with _lock:
-                j = jobs.pop(k, {})
-            if j.get("filename"):
-                (CLIPS_DIR / j["filename"]).unlink(missing_ok=True)
-        if old:
+            orphaned = [k for k, v in jobs.items()
+                        if v["status"] == "done" and v.get("filename")
+                        and not (CLIPS_DIR / v["filename"]).exists()]
+            for k in orphaned:
+                jobs.pop(k, None)
+        if orphaned:
             _save_jobs()
 
 
@@ -240,6 +287,7 @@ def _cleanup_orphans() -> None:
 
 # ── Startup ───────────────────────────────────────────────────────────────────
 
+_load_settings()
 _load_users()
 _load_jobs()
 _cleanup_orphans()
@@ -317,6 +365,10 @@ select{cursor:pointer;background-image:url("data:image/svg+xml,%3Csvg xmlns='htt
 .btn:hover{background:#ea6c00}
 .msg{font-size:.8rem;margin-top:.75rem;text-align:center;display:none}
 .msg.ok{color:#2ecc71}.msg.err{color:#e63946}
+.storage-bar-bg{height:8px;background:#222;border-radius:99px;overflow:hidden;margin-bottom:.6rem}
+.storage-bar-fill{height:100%;background:#f97316;border-radius:99px;transition:width .4s;width:0%}
+.storage-bar-fill.warn{background:#e63946}
+.storage-label{font-size:.82rem;color:#666}
 </style>
 </head>
 <body>
@@ -343,6 +395,17 @@ select{cursor:pointer;background-image:url("data:image/svg+xml,%3Csvg xmlns='htt
   </select>
   <button class="btn" onclick="addUser()">Add User</button>
   <div class="msg" id="add-msg"></div>
+</div>
+
+<div class="card">
+  <div class="card-title">Storage</div>
+  <div class="storage-bar-bg"><div class="storage-bar-fill" id="stor-fill"></div></div>
+  <div class="storage-label" id="stor-label">loading...</div>
+  <div style="height:1.25rem"></div>
+  <label>Storage Limit (GB)</label>
+  <input id="stor-limit" type="number" min="1" step="1" placeholder="20">
+  <button class="btn" onclick="saveLimit()">Save Limit</button>
+  <div class="msg" id="stor-msg"></div>
 </div>
 
 <script>
@@ -386,8 +449,38 @@ async function addUser() {
   setTimeout(()=>msg.style.display='none', 3000);
 }
 
+async function loadStorage() {
+  const r = await fetch('/api/admin/storage');
+  if (!r.ok) return;
+  const d = await r.json();
+  const pct = Math.min(d.used_gb / d.limit_gb * 100, 100);
+  const fill = document.getElementById('stor-fill');
+  fill.style.width = pct + '%';
+  fill.className = 'storage-bar-fill' + (pct > 85 ? ' warn' : '');
+  document.getElementById('stor-label').textContent =
+    `${d.used_gb} GB used of ${d.limit_gb} GB · ${d.clip_count} clip${d.clip_count !== 1 ? 's' : ''}`;
+  document.getElementById('stor-limit').value = d.limit_gb;
+}
+
+async function saveLimit() {
+  const val = parseFloat(document.getElementById('stor-limit').value);
+  const msg = document.getElementById('stor-msg');
+  const r = await fetch('/api/admin/settings', {
+    method:'PUT', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({storage_limit_gb: val})
+  });
+  if (r.ok) {
+    msg.textContent = 'saved'; msg.className = 'msg ok'; msg.style.display = 'block';
+    loadStorage();
+  } else {
+    msg.textContent = 'error'; msg.className = 'msg err'; msg.style.display = 'block';
+  }
+  setTimeout(() => msg.style.display = 'none', 2000);
+}
+
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 loadUsers();
+loadStorage();
 </script>
 </body></html>"""
 
@@ -552,6 +645,40 @@ async def download(job_id: str, request: Request):
     title = _slug(j.get('title') or 'clip')
     dl_name = f"{title}_{_ts(j.get('start_raw',''))}-{_ts(j.get('end_raw',''))}.mp4"
     return FileResponse(str(fp), media_type="video/mp4", filename=dl_name)
+
+
+# ── Settings / storage API ───────────────────────────────────────────────────
+
+@app.get("/api/admin/storage")
+async def admin_storage(request: Request):
+    if _get_role(_get_user(request) or "") != "admin":
+        raise HTTPException(403)
+    used = _storage_bytes()
+    limit = int(settings.get("storage_limit_gb", 20) * 1024 ** 3)
+    with _lock:
+        clip_count = sum(1 for v in jobs.values() if v["status"] == "done")
+    return {
+        "used_bytes": used,
+        "limit_bytes": limit,
+        "used_gb": round(used / 1024 ** 3, 2),
+        "limit_gb": settings.get("storage_limit_gb", 20),
+        "clip_count": clip_count,
+    }
+
+
+@app.put("/api/admin/settings")
+async def update_settings(request: Request):
+    if _get_role(_get_user(request) or "") != "admin":
+        raise HTTPException(403)
+    data = await request.json()
+    if "storage_limit_gb" in data:
+        val = float(data["storage_limit_gb"])
+        if val <= 0:
+            raise HTTPException(400, "limit must be > 0")
+        settings["storage_limit_gb"] = val
+        _save_settings()
+        _enforce_storage_limit()
+    return {"ok": True, "settings": settings}
 
 
 # ── Admin routes ──────────────────────────────────────────────────────────────
