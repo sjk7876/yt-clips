@@ -147,14 +147,33 @@ select {
 .progress-text.error-text { color: #f97316; }
 
 /* Section header */
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
 .section-title {
   font-size: .7rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 1px;
   color: #444;
-  margin-bottom: 1rem;
 }
+
+.btn-clear {
+  font-size: .72rem;
+  font-weight: 600;
+  color: #555;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  transition: color .15s;
+}
+
+.btn-clear:hover { color: #e63946; }
 
 /* Clip items */
 .clip-item {
@@ -274,7 +293,10 @@ select {
 </div>
 
 <div class="card">
-  <div class="section-title">Recent Clips (24h)</div>
+  <div class="section-header">
+    <div class="section-title">Recent Clips (24h)</div>
+    <button class="btn-clear" id="clear-btn" onclick="clearClips()">delete all</button>
+  </div>
   <div id="clips-list"><div class="empty">no clips yet</div></div>
 </div>
 
@@ -398,6 +420,16 @@ function extractId(url) {
 
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+async function clearClips() {
+  const btn = document.getElementById('clear-btn');
+  btn.textContent = 'deleting...';
+  btn.disabled = true;
+  await fetch('/api/clips', {method: 'DELETE'});
+  await loadClips();
+  btn.textContent = 'delete all';
+  btn.disabled = false;
 }
 
 loadClips();

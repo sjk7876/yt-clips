@@ -204,6 +204,16 @@ def _cleanup():
 
 
 _load_jobs()
+
+# Delete clip files on disk that have no matching job entry
+def _cleanup_orphans() -> None:
+    with _lock:
+        known = {v["filename"] for v in jobs.values() if v.get("filename")}
+    for f in CLIPS_DIR.glob("*.mp4"):
+        if f.name not in known:
+            f.unlink(missing_ok=True)
+
+_cleanup_orphans()
 threading.Thread(target=_cleanup, daemon=True).start()
 
 _LOGIN_HTML = """<!DOCTYPE html>
@@ -332,6 +342,19 @@ async def list_clips(request: Request):
             for k, v in sorted(jobs.items(), key=lambda x: -x[1]["created_at"])
             if v["status"] == "done"
         ]
+
+
+@app.delete("/api/clips")
+async def clear_clips(request: Request):
+    if not authed(request):
+        raise HTTPException(401)
+    with _lock:
+        filenames = [v["filename"] for v in jobs.values() if v.get("filename")]
+        jobs.clear()
+    for fname in filenames:
+        (CLIPS_DIR / fname).unlink(missing_ok=True)
+    _save_jobs()
+    return {"ok": True}
 
 
 @app.get("/api/download/{job_id}")
