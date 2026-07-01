@@ -1,13 +1,37 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
 from pathlib import Path
-import subprocess, uuid, os, time, hashlib, threading, re
+import subprocess, uuid, os, time, hashlib, threading, re, json
 
 app = FastAPI()
 
 BASE = Path(__file__).parent
 CLIPS_DIR = BASE / "clips"
 CLIPS_DIR.mkdir(exist_ok=True)
+JOBS_FILE = CLIPS_DIR / "jobs.json"
+
+
+def _save_jobs() -> None:
+    try:
+        with _lock:
+            done = {k: v for k, v in jobs.items() if v["status"] == "done"}
+        JOBS_FILE.write_text(json.dumps(done))
+    except Exception:
+        pass
+
+
+def _load_jobs() -> None:
+    if not JOBS_FILE.exists():
+        return
+    try:
+        data = json.loads(JOBS_FILE.read_text())
+        cutoff = time.time() - 86400
+        with _lock:
+            for k, v in data.items():
+                if v.get("created_at", 0) > cutoff and (CLIPS_DIR / v.get("filename", "")).exists():
+                    jobs[k] = v
+    except Exception:
+        pass
 
 CLIP_PASSWORD = os.environ.get("CLIP_PASSWORD", "clipme")
 _TOKEN = hashlib.sha256(f"{CLIP_PASSWORD}:yt-clips".encode()).hexdigest()
@@ -151,6 +175,7 @@ def _worker(job_id: str, url: str, start: str, end: str, quality: str):
             if found:
                 with _lock:
                     jobs[job_id].update(status="done", filename=found[0].name, pct=100, progress="Done")
+                _save_jobs()
             else:
                 with _lock:
                     jobs[job_id].update(status="error", error="output file not found after download")
@@ -174,8 +199,11 @@ def _cleanup():
                 j = jobs.pop(k, {})
             if j.get("filename"):
                 (CLIPS_DIR / j["filename"]).unlink(missing_ok=True)
+        if old:
+            _save_jobs()
 
 
+_load_jobs()
 threading.Thread(target=_cleanup, daemon=True).start()
 
 _LOGIN_HTML = """<!DOCTYPE html>
