@@ -320,8 +320,15 @@ async function poll(jid) {
       clearInterval(pollTimer);
       setProgress(100, 'Done!', 'done');
       setTimeout(() => {
-        window.location.href = `/api/download/${jid}`;
-        setTimeout(() => { hideProgress(); setBtn(true); loadClips(); }, 1500);
+        const a = document.createElement('a');
+        a.href = `/api/download/${jid}`;
+        a.download = '';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        hideProgress();
+        setBtn(true);
+        loadClips();
       }, 400);
     } else if (d.status === 'error') {
       clearInterval(pollTimer);
