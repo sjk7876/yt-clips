@@ -12,7 +12,10 @@ Download time-range clips from YouTube VODs in 1080p. Built for pulling volleyba
 - **Mark Start / Mark End** buttons capture the current playback time
 - 1080p by default (720p / 480p available)
 - Downloads save as `Video_Title_5m48s-6m03s.mp4`
-- Password-protected with rate limiting (5 failed attempts / 60s per IP)
+- Multi-user accounts — each person has their own login
+- **Mine** tab shows your clips; **All** tab shows everyone's (with owner label)
+- `/admin` page to add and remove users (admin only)
+- Rate limiting on login (5 failed attempts / 60s per IP)
 - Clips auto-purge after 24 hours; delete-all button for manual cleanup
 - Video title shown in recent clips list
 - Live encoding progress
@@ -34,11 +37,15 @@ uvicorn main:app --reload --port 8765
 
 Open `http://localhost:8765` — default password is `clipme`.
 
-Set a custom password via env var:
+Set the admin credentials via env vars (defaults to username `spenc`, password `clipme`):
 
 ```bash
-CLIP_PASSWORD=yourpassword uvicorn main:app --reload --port 8765
+ADMIN_USER=yourname ADMIN_PASSWORD=yourpassword uvicorn main:app --reload --port 8765
 ```
+
+On first run, `users.json` is created in `clips/` with the admin account. Add other users via `/admin`.
+
+`CLIP_PASSWORD` still works as a fallback for `ADMIN_PASSWORD` if you're migrating from a single-password setup.
 
 ## Deploy (Docker + Caddy)
 

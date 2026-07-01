@@ -1,14 +1,77 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
 from pathlib import Path
-import subprocess, uuid, os, time, hashlib, threading, re, json
+import subprocess, uuid, os, time, hashlib, threading, re, json, hmac as _hmac
 
 app = FastAPI()
 
 BASE = Path(__file__).parent
 CLIPS_DIR = BASE / "clips"
 CLIPS_DIR.mkdir(exist_ok=True)
-JOBS_FILE = CLIPS_DIR / "jobs.json"
+JOBS_FILE  = CLIPS_DIR / "jobs.json"
+USERS_FILE = CLIPS_DIR / "users.json"
+
+# ── Config ────────────────────────────────────────────────────────────────────
+
+ADMIN_USER     = os.environ.get("ADMIN_USER", "spenc")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD") or os.environ.get("CLIP_PASSWORD", "changeme")
+_MASTER        = hashlib.sha256((os.environ.get("SECRET_KEY", ADMIN_PASSWORD) + ":yt-clips-master").encode()).hexdigest()
+
+# ── Users ─────────────────────────────────────────────────────────────────────
+
+users: dict = {}
+_users_lock = threading.Lock()
+
+
+def _hash_pw(username: str, password: str) -> str:
+    return hashlib.sha256(f"{username}:{password}:yt-clips-pw".encode()).hexdigest()
+
+
+def _session_token(username: str, pw_hash: str) -> str:
+    return _hmac.new(_MASTER.encode(), f"{username}:{pw_hash}".encode(), hashlib.sha256).hexdigest()
+
+
+def _load_users() -> None:
+    if USERS_FILE.exists():
+        try:
+            with _users_lock:
+                users.update(json.loads(USERS_FILE.read_text()))
+            return
+        except Exception:
+            pass
+    with _users_lock:
+        users[ADMIN_USER] = {"password_hash": _hash_pw(ADMIN_USER, ADMIN_PASSWORD), "role": "admin"}
+    _save_users()
+
+
+def _save_users() -> None:
+    try:
+        with _users_lock:
+            USERS_FILE.write_text(json.dumps(users, indent=2))
+    except Exception:
+        pass
+
+
+def _get_user(request: Request):
+    token = request.cookies.get("auth")
+    if not token:
+        return None
+    with _users_lock:
+        for uname, data in users.items():
+            if _session_token(uname, data["password_hash"]) == token:
+                return uname
+    return None
+
+
+def _get_role(username: str) -> str:
+    with _users_lock:
+        return users.get(username, {}).get("role", "user")
+
+
+# ── Jobs ──────────────────────────────────────────────────────────────────────
+
+jobs: dict = {}
+_lock = threading.Lock()
 
 
 def _save_jobs() -> None:
@@ -33,20 +96,16 @@ def _load_jobs() -> None:
     except Exception:
         pass
 
-CLIP_PASSWORD = os.environ.get("CLIP_PASSWORD", "clipme")
-_TOKEN = hashlib.sha256(f"{CLIP_PASSWORD}:yt-clips".encode()).hexdigest()
 
-jobs: dict = {}
-_lock = threading.Lock()
+# ── Rate limiting ─────────────────────────────────────────────────────────────
 
-_login_attempts: dict = {}  # ip -> [timestamp, ...]
+_login_attempts: dict = {}
 _rate_lock = threading.Lock()
-_RATE_WINDOW = 60   # seconds
-_RATE_MAX = 5       # failed attempts before lockout
+_RATE_WINDOW = 60
+_RATE_MAX = 5
 
 
 def _rate_check(ip: str) -> bool:
-    """Return True if the IP is allowed to attempt login, False if locked out."""
     now = time.time()
     with _rate_lock:
         hits = [t for t in _login_attempts.get(ip, []) if now - t < _RATE_WINDOW]
@@ -55,14 +114,11 @@ def _rate_check(ip: str) -> bool:
 
 
 def _rate_record(ip: str) -> None:
-    now = time.time()
     with _rate_lock:
-        _login_attempts.setdefault(ip, []).append(now)
+        _login_attempts.setdefault(ip, []).append(time.time())
 
 
-def authed(req: Request) -> bool:
-    return req.cookies.get("auth") == _TOKEN
-
+# ── Clip worker ───────────────────────────────────────────────────────────────
 
 def hms(t: str) -> str:
     parts = t.strip().split(":")
@@ -93,11 +149,9 @@ def _worker(job_id: str, url: str, start: str, end: str, quality: str):
         jobs[job_id].update(status="running", progress="Fetching info...", pct=0)
 
     try:
-        title_proc = subprocess.run(
-            ["yt-dlp", "--print", "title", "--no-playlist", url],
-            capture_output=True, text=True, timeout=20
-        )
-        title = title_proc.stdout.strip() if title_proc.returncode == 0 else None
+        r = subprocess.run(["yt-dlp", "--print", "title", "--no-playlist", url],
+                           capture_output=True, text=True, timeout=20)
+        title = r.stdout.strip() if r.returncode == 0 else None
     except Exception:
         title = None
 
@@ -105,7 +159,7 @@ def _worker(job_id: str, url: str, start: str, end: str, quality: str):
         jobs[job_id]["title"] = title
         jobs[job_id]["progress"] = "Starting download..."
 
-    phase = [0]  # 0=video, 1=audio
+    phase = [0]
     log = []
     total_frames = [None]
 
@@ -116,60 +170,32 @@ def _worker(job_id: str, url: str, start: str, end: str, quality: str):
             if not line:
                 continue
             log.append(line)
-
             with _lock:
                 cur_pct = jobs[job_id].get("pct", 0)
-
-            pct = cur_pct
-            progress = None  # None = don't update
-
+            pct, progress = cur_pct, None
             if "Downloading audio" in line:
                 phase[0] = 1
-
             if "[download]" in line and "%" in line:
                 m = re.search(r"(\d+\.?\d*)%", line)
                 if m:
                     p = float(m.group(1))
-                    if phase[0] == 0:
-                        pct = p * 0.5
-                        progress = f"Video {p:.0f}%"
-                    else:
-                        pct = 50 + p * 0.45
-                        progress = f"Audio {p:.0f}%"
+                    pct = p * 0.5 if phase[0] == 0 else 50 + p * 0.45
+                    progress = f"Video {p:.0f}%" if phase[0] == 0 else f"Audio {p:.0f}%"
             elif "Merger" in line or "Merging" in line:
-                pct = 97
-                progress = "Merging video + audio..."
+                pct, progress = 97, "Merging video + audio..."
             elif line.startswith("frame="):
-                # ffmpeg encoding progress: "frame=  123 fps= 45 ..."
-                fm = re.search(r"frame=\s*(\d+)", line)
-                dur_m = re.search(r"time=(\d+):(\d+):(\d+\.?\d*)", line)
-                if fm and dur_m:
-                    h, mn, s = int(dur_m.group(1)), int(dur_m.group(2)), float(dur_m.group(3))
-                    encoded_s = h * 3600 + mn * 60 + s
-                    # estimate total duration from first frame line if we have it
-                    if total_frames[0] is None and encoded_s > 0:
-                        total_frames[0] = encoded_s  # update as we go
-                    if total_frames[0] and total_frames[0] > 0:
-                        enc_pct = min(encoded_s / total_frames[0], 1.0) if total_frames[0] > 0 else 0
-                        pct = 50 + enc_pct * 45
-                    fps_m = re.search(r"fps=\s*(\d+)", line)
-                    fps = fps_m.group(1) if fps_m else "?"
-                    progress = f"Encoding... {fps} fps"
-                    total_frames[0] = max(total_frames[0] or 0, encoded_s)
-                else:
-                    progress = "Encoding..."
-                    pct = max(cur_pct, 50)
+                fps_m = re.search(r"fps=\s*(\d+)", line)
+                fps = fps_m.group(1) if fps_m else "?"
+                pct = max(cur_pct, 50)
+                progress = f"Encoding... {fps} fps"
             elif "[ffmpeg]" in line and "Destination" not in line:
                 pct = max(cur_pct, 50)
                 progress = "Processing..."
-
             if progress is not None:
                 with _lock:
                     jobs[job_id]["pct"] = pct
                     jobs[job_id]["progress"] = progress
-
         proc.wait()
-
         if proc.returncode == 0:
             found = list(CLIPS_DIR.glob(f"{job_id}*.mp4"))
             if found:
@@ -182,11 +208,12 @@ def _worker(job_id: str, url: str, start: str, end: str, quality: str):
         else:
             with _lock:
                 jobs[job_id].update(status="error", error="\n".join(log[-10:]))
-
     except Exception as e:
         with _lock:
             jobs[job_id].update(status="error", error=str(e))
 
+
+# ── Cleanup ───────────────────────────────────────────────────────────────────
 
 def _cleanup():
     while True:
@@ -203,9 +230,6 @@ def _cleanup():
             _save_jobs()
 
 
-_load_jobs()
-
-# Delete clip files on disk that have no matching job entry
 def _cleanup_orphans() -> None:
     with _lock:
         known = {v["filename"] for v in jobs.values() if v.get("filename")}
@@ -213,45 +237,162 @@ def _cleanup_orphans() -> None:
         if f.name not in known:
             f.unlink(missing_ok=True)
 
+
+# ── Startup ───────────────────────────────────────────────────────────────────
+
+_load_users()
+_load_jobs()
 _cleanup_orphans()
 threading.Thread(target=_cleanup, daemon=True).start()
+
+
+# ── Inline HTML ───────────────────────────────────────────────────────────────
 
 _LOGIN_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>yt-clips</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0f0f0f;color:#e8e8e8;font-family:system-ui,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center}
-.card{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:16px;padding:2rem;width:320px}
+.card{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:16px;padding:2rem;width:340px}
 h1{font-size:1.4rem;font-weight:800;margin-bottom:1.75rem;letter-spacing:-.5px}
 h1 em{color:#f97316;font-style:normal}
-input{width:100%;padding:.75rem 1rem;background:#111;border:1px solid #333;border-radius:8px;color:#eee;font-size:1rem;margin-bottom:1rem;outline:none;transition:border-color .15s}
+label{display:block;font-size:.7rem;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.6px;margin-bottom:.35rem}
+input{width:100%;padding:.7rem 1rem;background:#111;border:1px solid #2e2e2e;border-radius:8px;color:#eee;font-size:1rem;margin-bottom:1rem;outline:none;transition:border-color .15s}
 input:focus{border-color:#f97316}
 .btn{width:100%;padding:.8rem;background:#f97316;border:none;border-radius:8px;color:#fff;font-size:1rem;font-weight:700;cursor:pointer;transition:background .15s}
 .btn:hover{background:#ea6c00}
-.err{color:#f97316;font-size:.82rem;margin-bottom:.75rem;display:none}
+.err{color:#e63946;font-size:.82rem;margin-bottom:.75rem;display:none}
 </style>
 </head>
 <body>
 <div class="card">
   <h1>yt<em>-</em>clips</h1>
-  <p class="err" id="err">wrong password</p>
+  <p class="err" id="err">wrong username or password</p>
+  <label>Username</label>
+  <input id="un" type="text" placeholder="username" onkeydown="if(event.key==='Enter')go()">
+  <label>Password</label>
   <input id="pw" type="password" placeholder="password" onkeydown="if(event.key==='Enter')go()">
   <button class="btn" onclick="go()">enter</button>
 </div>
 <script>
 async function go(){
-  const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:document.getElementById('pw').value})});
+  const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({username:document.getElementById('un').value,password:document.getElementById('pw').value})});
   if(r.ok)location.href='/';
-  else{document.getElementById('err').style.display='block';}
+  else document.getElementById('err').style.display='block';
 }
 </script>
-</body>
-</html>"""
+</body></html>"""
 
+
+_ADMIN_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>yt-clips · admin</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f0f0f;color:#e8e8e8;font-family:system-ui,sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:2.5rem 1rem}
+header{width:100%;max-width:520px;display:flex;align-items:baseline;gap:.75rem;margin-bottom:2rem}
+h1{font-size:1.4rem;font-weight:800;letter-spacing:-.5px}
+h1 em{color:#f97316;font-style:normal}
+.back{font-size:.8rem;color:#555;text-decoration:none}
+.back:hover{color:#999}
+.card{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:16px;padding:1.75rem;width:100%;max-width:520px;margin-bottom:1.25rem}
+.card-title{font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#444;margin-bottom:1.25rem}
+.user-row{display:flex;align-items:center;gap:.75rem;padding:.7rem .9rem;background:#111;border:1px solid #222;border-radius:8px;margin-bottom:.5rem}
+.user-name{flex:1;font-weight:600;font-size:.9rem}
+.badge{font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px;padding:.2rem .5rem;border-radius:4px;background:#2a2a2a;color:#666}
+.badge.admin{background:#f9731622;color:#f97316}
+.btn-del{padding:.35rem .75rem;background:transparent;border:1px solid #333;border-radius:6px;color:#666;font-size:.75rem;font-weight:600;cursor:pointer;transition:all .15s}
+.btn-del:hover{border-color:#e63946;color:#e63946}
+label{display:block;font-size:.7rem;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.6px;margin-bottom:.35rem}
+input,select{width:100%;padding:.65rem .9rem;background:#111;border:1px solid #2e2e2e;border-radius:8px;color:#eee;font-size:.9rem;margin-bottom:.9rem;outline:none;transition:border-color .15s;-webkit-appearance:none}
+input:focus,select:focus{border-color:#f97316}
+select{cursor:pointer;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23666' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;padding-right:1.75rem}
+.btn{width:100%;padding:.75rem;background:#f97316;border:none;border-radius:8px;color:#fff;font-size:.9rem;font-weight:700;cursor:pointer;transition:background .15s}
+.btn:hover{background:#ea6c00}
+.msg{font-size:.8rem;margin-top:.75rem;text-align:center;display:none}
+.msg.ok{color:#2ecc71}.msg.err{color:#e63946}
+</style>
+</head>
+<body>
+<header>
+  <h1>yt<em>-</em>clips</h1>
+  <a class="back" href="/">← back</a>
+</header>
+
+<div class="card">
+  <div class="card-title">Users</div>
+  <div id="user-list">loading...</div>
+</div>
+
+<div class="card">
+  <div class="card-title">Add User</div>
+  <label>Username</label>
+  <input id="new-un" type="text" placeholder="username">
+  <label>Password</label>
+  <input id="new-pw" type="password" placeholder="password">
+  <label>Role</label>
+  <select id="new-role">
+    <option value="user">user</option>
+    <option value="admin">admin</option>
+  </select>
+  <button class="btn" onclick="addUser()">Add User</button>
+  <div class="msg" id="add-msg"></div>
+</div>
+
+<script>
+async function loadUsers() {
+  const r = await fetch('/api/admin/users');
+  if (!r.ok) return;
+  const list = await r.json();
+  const el = document.getElementById('user-list');
+  el.innerHTML = list.map(u => `
+    <div class="user-row">
+      <span class="user-name">${esc(u.username)}</span>
+      <span class="badge ${u.role}">${esc(u.role)}</span>
+      <button class="btn-del" onclick="delUser('${esc(u.username)}')">remove</button>
+    </div>`).join('') || '<div style="color:#444;font-size:.85rem;padding:.5rem">no users</div>';
+}
+
+async function delUser(username) {
+  if (!confirm('Remove ' + username + '?')) return;
+  await fetch('/api/admin/users/' + username, {method:'DELETE'});
+  loadUsers();
+}
+
+async function addUser() {
+  const un = document.getElementById('new-un').value.trim();
+  const pw = document.getElementById('new-pw').value;
+  const role = document.getElementById('new-role').value;
+  const msg = document.getElementById('add-msg');
+  const r = await fetch('/api/admin/users', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({username:un, password:pw, role})
+  });
+  if (r.ok) {
+    msg.textContent = 'user added'; msg.className='msg ok'; msg.style.display='block';
+    document.getElementById('new-un').value='';
+    document.getElementById('new-pw').value='';
+    loadUsers();
+  } else {
+    const e = await r.json().catch(()=>({}));
+    msg.textContent = e.detail || 'error'; msg.className='msg err'; msg.style.display='block';
+  }
+  setTimeout(()=>msg.style.display='none', 3000);
+}
+
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+loadUsers();
+</script>
+</body></html>"""
+
+
+# ── Auth routes ───────────────────────────────────────────────────────────────
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page():
@@ -264,58 +405,73 @@ async def do_login(request: Request):
     if not _rate_check(ip):
         return JSONResponse({"ok": False, "error": "too many attempts"}, status_code=429)
     data = await request.json()
-    if data.get("password") == CLIP_PASSWORD:
-        r = JSONResponse({"ok": True})
-        r.set_cookie("auth", _TOKEN, httponly=True, samesite="lax", max_age=86400 * 30)
-        return r
-    _rate_record(ip)
-    return JSONResponse({"ok": False}, status_code=401)
+    username = data.get("username", "").strip().lower()
+    password = data.get("password", "")
+    with _users_lock:
+        user_data = users.get(username)
+    if not user_data or _hash_pw(username, password) != user_data["password_hash"]:
+        _rate_record(ip)
+        return JSONResponse({"ok": False}, status_code=401)
+    r = JSONResponse({"ok": True})
+    r.set_cookie("auth", _session_token(username, user_data["password_hash"]),
+                 httponly=True, samesite="lax", max_age=86400 * 30)
+    return r
 
+
+@app.post("/api/logout")
+async def logout():
+    r = JSONResponse({"ok": True})
+    r.delete_cookie("auth")
+    return r
+
+
+@app.get("/api/me")
+async def me(request: Request):
+    username = _get_user(request)
+    if not username:
+        raise HTTPException(401)
+    return {"username": username, "role": _get_role(username)}
+
+
+# ── Main app ──────────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    if not authed(request):
+    if not _get_user(request):
         return RedirectResponse("/login")
     return (BASE / "static" / "index.html").read_text()
 
 
 @app.post("/api/clip")
 async def create_clip(request: Request):
-    if not authed(request):
+    username = _get_user(request)
+    if not username:
         raise HTTPException(401)
     d = await request.json()
     url = d.get("url", "").strip()
     start_raw = d.get("start", "").strip()
     end_raw = d.get("end", "").strip()
     quality = str(d.get("quality", "1080"))
-
     if not all([url, start_raw, end_raw]):
         raise HTTPException(400, "url, start, and end are required")
-
     try:
         start, end = hms(start_raw), hms(end_raw)
     except ValueError as e:
         raise HTTPException(400, str(e))
-
     jid = str(uuid.uuid4())
     with _lock:
         jobs[jid] = {
-            "status": "pending",
-            "pct": 0,
-            "progress": "Queued",
-            "created_at": time.time(),
-            "url": url,
-            "start_raw": start_raw,
-            "end_raw": end_raw,
+            "status": "pending", "pct": 0, "progress": "Queued",
+            "created_at": time.time(), "url": url,
+            "start_raw": start_raw, "end_raw": end_raw, "owner": username,
         }
-
     threading.Thread(target=_worker, args=(jid, url, start, end, quality), daemon=True).start()
     return {"job_id": jid}
 
 
 @app.get("/api/status/{job_id}")
 async def get_status(job_id: str, request: Request):
-    if not authed(request):
+    if not _get_user(request):
         raise HTTPException(401)
     with _lock:
         j = jobs.get(job_id)
@@ -326,19 +482,30 @@ async def get_status(job_id: str, request: Request):
 
 @app.get("/api/clips")
 async def list_clips(request: Request):
-    if not authed(request):
+    username = _get_user(request)
+    if not username:
+        raise HTTPException(401)
+    is_admin = _get_role(username) == "admin"
+    with _lock:
+        return [
+            {"job_id": k, "title": v.get("title"), "start_raw": v.get("start_raw"),
+             "end_raw": v.get("end_raw"), "url": v.get("url"), "created_at": v["created_at"]}
+            for k, v in sorted(jobs.items(), key=lambda x: -x[1]["created_at"])
+            if v["status"] == "done" and (
+                v.get("owner") == username or (is_admin and v.get("owner") is None)
+            )
+        ]
+
+
+@app.get("/api/clips/all")
+async def list_all_clips(request: Request):
+    if not _get_user(request):
         raise HTTPException(401)
     with _lock:
         return [
-            {
-                "job_id": k,
-                "filename": v.get("filename"),
-                "title": v.get("title"),
-                "start_raw": v.get("start_raw"),
-                "end_raw": v.get("end_raw"),
-                "url": v.get("url"),
-                "created_at": v["created_at"],
-            }
+            {"job_id": k, "title": v.get("title"), "start_raw": v.get("start_raw"),
+             "end_raw": v.get("end_raw"), "url": v.get("url"),
+             "created_at": v["created_at"], "owner": v.get("owner")}
             for k, v in sorted(jobs.items(), key=lambda x: -x[1]["created_at"])
             if v["status"] == "done"
         ]
@@ -346,20 +513,25 @@ async def list_clips(request: Request):
 
 @app.delete("/api/clips")
 async def clear_clips(request: Request):
-    if not authed(request):
+    username = _get_user(request)
+    if not username:
         raise HTTPException(401)
+    is_admin = _get_role(username) == "admin"
     with _lock:
-        filenames = [v["filename"] for v in jobs.values() if v.get("filename")]
-        jobs.clear()
-    for fname in filenames:
-        (CLIPS_DIR / fname).unlink(missing_ok=True)
+        to_del = [k for k, v in jobs.items()
+                  if v.get("owner") == username or (is_admin and v.get("owner") is None)]
+        filenames = [jobs[k].get("filename") for k in to_del if jobs[k].get("filename")]
+        for k in to_del:
+            del jobs[k]
+    for f in filenames:
+        (CLIPS_DIR / f).unlink(missing_ok=True)
     _save_jobs()
     return {"ok": True}
 
 
 @app.get("/api/download/{job_id}")
 async def download(job_id: str, request: Request):
-    if not authed(request):
+    if not _get_user(request):
         raise HTTPException(401)
     with _lock:
         j = jobs.get(job_id)
@@ -368,6 +540,7 @@ async def download(job_id: str, request: Request):
     fp = CLIPS_DIR / j["filename"]
     if not fp.exists():
         raise HTTPException(404)
+
     def _slug(s: str) -> str:
         return re.sub(r'[^\w\s-]', '', s).strip().replace(' ', '_')[:60]
 
@@ -379,3 +552,53 @@ async def download(job_id: str, request: Request):
     title = _slug(j.get('title') or 'clip')
     dl_name = f"{title}_{_ts(j.get('start_raw',''))}-{_ts(j.get('end_raw',''))}.mp4"
     return FileResponse(str(fp), media_type="video/mp4", filename=dl_name)
+
+
+# ── Admin routes ──────────────────────────────────────────────────────────────
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_page(request: Request):
+    if _get_role(_get_user(request) or "") != "admin":
+        return RedirectResponse("/")
+    return _ADMIN_HTML
+
+
+@app.get("/api/admin/users")
+async def admin_list_users(request: Request):
+    if _get_role(_get_user(request) or "") != "admin":
+        raise HTTPException(403)
+    with _users_lock:
+        return [{"username": k, "role": v["role"]} for k, v in users.items()]
+
+
+@app.post("/api/admin/users")
+async def admin_add_user(request: Request):
+    if _get_role(_get_user(request) or "") != "admin":
+        raise HTTPException(403)
+    data = await request.json()
+    username = data.get("username", "").strip().lower()
+    password = data.get("password", "")
+    role = data.get("role", "user")
+    if not username or not password:
+        raise HTTPException(400, "username and password required")
+    with _users_lock:
+        if username in users:
+            raise HTTPException(409, "user already exists")
+        users[username] = {"password_hash": _hash_pw(username, password), "role": role}
+    _save_users()
+    return {"ok": True}
+
+
+@app.delete("/api/admin/users/{target}")
+async def admin_delete_user(target: str, request: Request):
+    me_user = _get_user(request)
+    if _get_role(me_user or "") != "admin":
+        raise HTTPException(403)
+    if target == me_user:
+        raise HTTPException(400, "cannot delete yourself")
+    with _users_lock:
+        if target not in users:
+            raise HTTPException(404)
+        del users[target]
+    _save_users()
+    return {"ok": True}
