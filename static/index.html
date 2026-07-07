@@ -405,6 +405,7 @@ select {
 
 var ytPlayer = null;
 var pendingVideoId = null;
+var currentVideoId = null;
 
 function onYouTubeIframeAPIReady() {
   if (pendingVideoId) {
@@ -414,6 +415,13 @@ function onYouTubeIframeAPIReady() {
 }
 
 function _createPlayer(videoId) {
+  // destroy() removes the iframe but not the wrapper, so we need to re-add the target div
+  const wrap = document.getElementById('player-wrap');
+  if (!document.getElementById('yt-player')) {
+    const div = document.createElement('div');
+    div.id = 'yt-player';
+    wrap.appendChild(div);
+  }
   ytPlayer = new YT.Player('yt-player', {
     videoId: videoId,
     playerVars: { playsinline: 1, controls: 1, rel: 0 },
@@ -427,11 +435,20 @@ function _createPlayer(videoId) {
 }
 
 function loadVideo(videoId) {
+  if (videoId === currentVideoId) return;
+  currentVideoId = videoId;
   document.getElementById('player-wrap').style.display = 'block';
   document.getElementById('mark-btns').style.display = 'grid';
-  if (ytPlayer && ytPlayer.loadVideoById) {
-    ytPlayer.loadVideoById(videoId);
-  } else if (typeof YT !== 'undefined' && YT.Player) {
+  // reset mark button state for the new video
+  document.getElementById('mark-start').classList.remove('marked');
+  document.getElementById('mark-end').classList.remove('marked');
+  document.getElementById('start-ts').textContent = '';
+  document.getElementById('end-ts').textContent = '';
+  if (ytPlayer) {
+    try { ytPlayer.destroy(); } catch(_) {}
+    ytPlayer = null;
+  }
+  if (typeof YT !== 'undefined' && YT.Player) {
     _createPlayer(videoId);
   } else {
     pendingVideoId = videoId;
@@ -481,6 +498,7 @@ document.getElementById('url').addEventListener('input', function() {
     if (vid) {
       loadVideo(vid);
     } else {
+      currentVideoId = null;
       document.getElementById('player-wrap').style.display = 'none';
       document.getElementById('mark-btns').style.display = 'none';
     }
