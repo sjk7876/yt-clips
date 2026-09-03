@@ -200,14 +200,54 @@ def hms(t: str) -> str:
     raise ValueError(f"bad time format: {t!r} — use MM:SS or HH:MM:SS")
 
 
+def _has_video_stream(path) -> bool:
+    """True if the file contains at least one decodable video stream with frames.
+
+    yt-dlp can exit 0 with an audio-only result when YouTube throttles the video
+    download to nothing (e.g. no JS runtime for signature deciphering), so a
+    clean return code isn't enough to trust the output.
+    """
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_type,nb_read_packets",
+             "-count_packets", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        out = r.stdout.strip()
+        if not out.startswith("video"):
+            return False
+        parts = out.split(",")
+        return len(parts) > 1 and parts[1].strip().isdigit() and int(parts[1]) > 0
+    except Exception:
+        return True  # probe failed — don't block a clip on a flaky ffprobe
+
+
+# Getting HD video off YouTube now needs three things working together:
+#   1. a GVS PO Token  — minted by the bgutil-provider sidecar container
+#   2. a JS runtime + EJS solver  — deno + yt-dlp-ejs, both baked into the image
+#   3. a player client that still serves plain HTTPS DASH  — the default/HLS
+#      path is SABR-gated and silently degrades to an audio-only file
+# Override the provider URL with POT_PROVIDER_URL if the container moves.
+_POT_PROVIDER_URL = os.environ.get("POT_PROVIDER_URL", "http://bgutil-provider:4416")
+_YTDLP_YT_ARGS = [
+    "--extractor-args", f"youtubepot-bgutilhttp:base_url={_POT_PROVIDER_URL}",
+    "--extractor-args", "youtube:player_client=default,mweb",
+]
+
+
 def _worker(job_id: str, url: str, start: str, end: str, quality: str):
     cmd = [
         "yt-dlp",
+        *_YTDLP_YT_ARGS,
         "--download-sections", f"*{start}-{end}",
         "--force-keyframes-at-cuts",
         "-f", (
-            f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]"
-            f"/bestvideo[height<={quality}]+bestaudio"
+            # [protocol=https] keeps us on real DASH and off the throttled
+            # HLS/SABR formats yt-dlp would otherwise rank higher.
+            f"bestvideo[height<={quality}][ext=mp4][protocol=https]+bestaudio[ext=m4a][protocol=https]"
+            f"/bestvideo[height<={quality}][protocol=https]+bestaudio[protocol=https]"
+            f"/best[height<={quality}][protocol=https]"
             f"/best[height<={quality}]"
         ),
         "--merge-output-format", "mp4",
@@ -220,7 +260,7 @@ def _worker(job_id: str, url: str, start: str, end: str, quality: str):
         jobs[job_id].update(status="running", progress="Fetching info...", pct=0)
 
     try:
-        r = subprocess.run(["yt-dlp", "--print", "title", "--no-playlist", url],
+        r = subprocess.run(["yt-dlp", *_YTDLP_YT_ARGS, "--print", "title", "--no-playlist", url],
                            capture_output=True, text=True, timeout=20)
         title = r.stdout.strip() if r.returncode == 0 else None
     except Exception:
@@ -269,7 +309,15 @@ def _worker(job_id: str, url: str, start: str, end: str, quality: str):
         proc.wait()
         if proc.returncode == 0:
             found = list(CLIPS_DIR.glob(f"{job_id}*.mp4"))
-            if found:
+            if found and not _has_video_stream(found[0]):
+                found[0].unlink(missing_ok=True)
+                with _lock:
+                    jobs[job_id].update(
+                        status="error",
+                        error="download produced no video (YouTube likely throttled "
+                              "the video stream) — try again, or a lower quality",
+                    )
+            elif found:
                 with _lock:
                     jobs[job_id].update(status="done", filename=found[0].name, pct=100, progress="Done")
                 _save_jobs()

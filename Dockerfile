@@ -1,7 +1,12 @@
 FROM python:3.11-slim
 
+# deno is yt-dlp's default JS runtime — required for YouTube signature
+# deciphering. Without it, video downloads get throttled to ~nothing and
+# clips come out audio-only.
+COPY --from=denoland/deno:bin-2.9.6 /deno /usr/local/bin/deno
+
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg nodejs \
+    && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
