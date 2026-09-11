@@ -159,10 +159,9 @@ def _load_jobs() -> None:
         return
     try:
         data = json.loads(JOBS_FILE.read_text())
-        cutoff = time.time() - 86400
         with _lock:
             for k, v in data.items():
-                if v.get("created_at", 0) > cutoff and (CLIPS_DIR / v.get("filename", "")).exists():
+                if (CLIPS_DIR / v.get("filename", "")).exists():
                     jobs[k] = v
     except Exception:
         pass
