@@ -334,6 +334,20 @@ select {
 
 .btn-dl:hover { background: #222; color: #eee; border-color: #444; }
 
+.btn-x {
+  background: none;
+  border: none;
+  color: #444;
+  font-size: 1rem;
+  line-height: 1;
+  padding: .25rem .4rem;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color .15s;
+}
+
+.btn-x:hover { color: #e63946; }
+
 .empty { text-align: center; color: #3a3a3a; font-size: .85rem; padding: 1.5rem; }
 </style>
 </head>
@@ -611,10 +625,13 @@ function setBtn(enabled) { document.getElementById('cut-btn').disabled = !enable
 
 // ── User info ────────────────────────────────────────────────────────────────
 
+let currentUser = null;
+
 async function initUser() {
   const r = await fetch('/api/me');
   if (!r.ok) { location.href = '/login'; return; }
   const u = await r.json();
+  currentUser = u.username;
   document.getElementById('username-display').textContent = u.display_name || u.username;
   if (u.role === 'admin') document.getElementById('admin-link').style.display = 'inline';
 }
@@ -647,6 +664,7 @@ function renderClips(containerId, clips, showOwner) {
         <div class="clip-title">${escHtml(c.title || extractVideoId(c.url) || c.url)}</div>
         <div class="clip-range">${escHtml(c.start_raw)} → ${escHtml(c.end_raw)}${c.descriptor ? `<span class="clip-desc">${escHtml(c.descriptor)}</span>` : ''}${showOwner && c.owner ? ` · <span class="clip-owner">${escHtml(c.owner_display || c.owner)}</span>` : ''}</div>
       </div>
+      ${!showOwner || c.owner === currentUser ? `<button class="btn-x" title="delete clip" onclick="deleteClip('${c.job_id}')">✕</button>` : ''}
       <a class="btn-dl" href="/api/download/${c.job_id}">↓ download</a>
     </div>`).join('');
 }
@@ -677,6 +695,11 @@ async function loadClips() {
   } catch(_) {}
 }
 
+async function deleteClip(jid) {
+  await fetch(`/api/clips/${jid}`, {method: 'DELETE'});
+  await loadClips();
+}
+
 async function clearClips() {
   const btn = document.getElementById('clear-btn');
   btn.textContent = 'deleting...';
@@ -691,8 +714,7 @@ function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-initUser();
-loadClips();
+initUser().then(loadClips);
 </script>
 </body>
 </html>

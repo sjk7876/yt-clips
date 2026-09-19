@@ -972,6 +972,23 @@ async def clear_clips(request: Request):
     return {"ok": True}
 
 
+@app.delete("/api/clips/{job_id}")
+async def delete_clip(job_id: str, request: Request):
+    username = _get_user(request)
+    if not username:
+        raise HTTPException(401)
+    is_admin = _get_role(username) == "admin"
+    with _lock:
+        j = jobs.get(job_id)
+        if not j or not (j.get("owner") == username or (is_admin and j.get("owner") is None)):
+            raise HTTPException(404)
+        del jobs[job_id]
+    if j.get("filename"):
+        (CLIPS_DIR / j["filename"]).unlink(missing_ok=True)
+    _save_jobs()
+    return {"ok": True}
+
+
 @app.get("/api/download/{job_id}")
 async def download(job_id: str, request: Request):
     if not _get_user(request):
