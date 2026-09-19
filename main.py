@@ -2,6 +2,8 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
 from pathlib import Path
 import subprocess, uuid, os, time, hashlib, threading, re, json, hmac as _hmac
+from datetime import datetime, timezone
+from urllib.parse import urlparse, parse_qs
 
 app = FastAPI()
 
@@ -186,6 +188,32 @@ def _rate_check(ip: str) -> bool:
 def _rate_record(ip: str) -> None:
     with _rate_lock:
         _login_attempts.setdefault(ip, []).append(time.time())
+
+
+_REG_WINDOW = 3600
+_REG_MAX = 3
+_reg_attempts: dict = {}
+
+
+def _client_ip(request: Request) -> str:
+    # Behind Caddy, request.client.host is always the proxy. Caddy sets
+    # X-Forwarded-For to the real client, and the app isn't reachable
+    # any other way, so the last entry is safe to trust.
+    xff = request.headers.get("x-forwarded-for", "")
+    return xff.split(",")[-1].strip() or request.client.host
+
+
+def _reg_rate_ok(ip: str) -> bool:
+    """Count every registration attempt; False once the hourly cap is hit."""
+    now = time.time()
+    with _rate_lock:
+        hits = [t for t in _reg_attempts.get(ip, []) if now - t < _REG_WINDOW]
+        if len(hits) >= _REG_MAX:
+            _reg_attempts[ip] = hits
+            return False
+        hits.append(now)
+        _reg_attempts[ip] = hits
+        return True
 
 
 # ── Clip worker ───────────────────────────────────────────────────────────────
@@ -837,7 +865,7 @@ async def login_page():
 
 @app.post("/api/login")
 async def do_login(request: Request):
-    ip = request.client.host
+    ip = _client_ip(request)
     if not _rate_check(ip):
         return JSONResponse({"ok": False, "error": "too many attempts"}, status_code=429)
     data = await request.json()
@@ -920,27 +948,72 @@ async def get_status(job_id: str, request: Request):
     return {k: j.get(k) for k in ("status", "pct", "progress", "filename", "error")}
 
 
+def _video_id(url: str):
+    """YouTube video id from a watch / youtu.be / live / shorts / embed URL, else None."""
+    try:
+        u = urlparse(url.strip())
+    except ValueError:
+        return None
+    host = (u.hostname or "").lower()
+    if "youtu.be" in host:
+        return u.path.lstrip("/").split("/")[0] or None
+    if "youtube.com" in host:
+        parts = [p for p in u.path.split("/") if p]
+        if len(parts) >= 2 and parts[0] in ("live", "shorts", "embed"):
+            return parts[1]
+        return (parse_qs(u.query).get("v") or [None])[0]
+    return None
+
+
+def _day_start(d: str) -> float:
+    try:
+        return datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        raise HTTPException(400, f"bad date '{d}' — use YYYY-MM-DD")
+
+
+def _clip_filter(video, since, until):
+    """Predicate over jobs. video = id or full URL; since/until = inclusive UTC dates."""
+    vid = (_video_id(video) or video.strip()) if video else None
+    lo = _day_start(since) if since else None
+    hi = _day_start(until) + 86400 if until else None
+
+    def ok(v) -> bool:
+        if vid and _video_id(v.get("url") or "") != vid:
+            return False
+        if lo is not None and v["created_at"] < lo:
+            return False
+        if hi is not None and v["created_at"] >= hi:
+            return False
+        return True
+    return ok
+
+
 @app.get("/api/clips")
-async def list_clips(request: Request):
+async def list_clips(request: Request, video: str | None = None,
+                     since: str | None = None, until: str | None = None):
     username = _get_user(request)
     if not username:
         raise HTTPException(401)
     is_admin = _get_role(username) == "admin"
+    match = _clip_filter(video, since, until)
     with _lock:
         return [
             {"job_id": k, "title": v.get("title"), "descriptor": v.get("descriptor"), "start_raw": v.get("start_raw"),
              "end_raw": v.get("end_raw"), "url": v.get("url"), "created_at": v["created_at"]}
             for k, v in sorted(jobs.items(), key=lambda x: -x[1]["created_at"])
-            if v["status"] == "done" and (
+            if v["status"] == "done" and match(v) and (
                 v.get("owner") == username or (is_admin and v.get("owner") is None)
             )
         ]
 
 
 @app.get("/api/clips/all")
-async def list_all_clips(request: Request):
+async def list_all_clips(request: Request, video: str | None = None,
+                         since: str | None = None, until: str | None = None):
     if not _get_user(request):
         raise HTTPException(401)
+    match = _clip_filter(video, since, until)
     with _users_lock:
         display_names = {k: v.get("display_name") or k for k, v in users.items()}
     with _lock:
@@ -950,7 +1023,7 @@ async def list_all_clips(request: Request):
              "created_at": v["created_at"], "owner": v.get("owner") or ADMIN_USER,
              "owner_display": display_names.get(v.get("owner") or ADMIN_USER) or (v.get("owner") or ADMIN_USER)}
             for k, v in sorted(jobs.items(), key=lambda x: -x[1]["created_at"])
-            if v["status"] == "done"
+            if v["status"] == "done" and match(v)
         ]
 
 
@@ -1190,6 +1263,8 @@ async def register_page():
 
 @app.post("/api/register")
 async def submit_registration(request: Request):
+    if not _reg_rate_ok(_client_ip(request)):
+        raise HTTPException(429, "too many requests — try again later")
     data = await request.json()
     username = data.get("username", "").strip().lower()
     display_name = data.get("display_name", "").strip()
