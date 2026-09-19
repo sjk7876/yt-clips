@@ -299,6 +299,17 @@ select {
   text-overflow: ellipsis;
 }
 
+.clip-desc {
+  display: inline-block;
+  margin-left: .5rem;
+  padding: .05rem .45rem;
+  border-radius: 4px;
+  background: #f9731622;
+  color: #f97316;
+  font-size: .7rem;
+  font-weight: 700;
+  vertical-align: middle;
+}
 .clip-range {
   font-size: .75rem;
   font-family: 'SF Mono', 'Fira Code', monospace;
@@ -375,6 +386,12 @@ select {
         <option value="480">480p</option>
       </select>
     </div>
+  </div>
+
+  <div class="field">
+    <label>Descriptor <span style="text-transform:none;letter-spacing:0;font-weight:400;color:#444">(optional, appended to filename)</span></label>
+    <input id="descriptor" type="text" maxlength="60" list="descriptor-list" autocomplete="off" placeholder="serve, hit, ...">
+    <datalist id="descriptor-list"></datalist>
   </div>
 
   <button class="btn" id="cut-btn" onclick="cutClip()">Cut Clip</button>
@@ -522,6 +539,8 @@ async function cutClip() {
   const start = document.getElementById('start').value.trim();
   const end   = document.getElementById('end').value.trim();
   const qual  = document.getElementById('quality').value;
+  const descriptor = document.getElementById('descriptor').value.trim();
+  rememberDescriptors([descriptor]);
 
   if (!url || !start || !end) return;
 
@@ -532,7 +551,7 @@ async function cutClip() {
     const res = await fetch('/api/clip', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({url, start, end, quality: qual}),
+      body: JSON.stringify({url, start, end, quality: qual, descriptor}),
     });
     if (!res.ok) {
       const e = await res.json().catch(() => ({detail: 'request failed'}));
@@ -626,16 +645,34 @@ function renderClips(containerId, clips, showOwner) {
       <div class="clip-icon">🎬</div>
       <div class="clip-meta">
         <div class="clip-title">${escHtml(c.title || extractVideoId(c.url) || c.url)}</div>
-        <div class="clip-range">${escHtml(c.start_raw)} → ${escHtml(c.end_raw)}${showOwner && c.owner ? ` · <span class="clip-owner">${escHtml(c.owner_display || c.owner)}</span>` : ''}</div>
+        <div class="clip-range">${escHtml(c.start_raw)} → ${escHtml(c.end_raw)}${c.descriptor ? `<span class="clip-desc">${escHtml(c.descriptor)}</span>` : ''}${showOwner && c.owner ? ` · <span class="clip-owner">${escHtml(c.owner_display || c.owner)}</span>` : ''}</div>
       </div>
       <a class="btn-dl" href="/api/download/${c.job_id}">↓ download</a>
     </div>`).join('');
 }
 
+// ── Descriptor autocomplete ─────────────────────────────────────────────────
+
+function rememberDescriptors(items) {
+  let saved = [];
+  try { saved = JSON.parse(localStorage.getItem('descriptors') || '[]'); } catch(_) {}
+  const all = [...new Set([...saved, ...items.filter(Boolean)])].sort();
+  try { localStorage.setItem('descriptors', JSON.stringify(all)); } catch(_) {}
+  const dl = document.getElementById('descriptor-list');
+  dl.innerHTML = '';
+  all.forEach(v => { const o = document.createElement('option'); o.value = v; dl.appendChild(o); });
+}
+
+rememberDescriptors([]);
+
 async function loadClips() {
   try {
     const [r1, r2] = await Promise.all([fetch('/api/clips'), fetch('/api/clips/all')]);
-    if (r1.ok) renderClips('clips-mine', await r1.json(), false);
+    if (r1.ok) {
+      const mine = await r1.json();
+      renderClips('clips-mine', mine, false);
+      rememberDescriptors(mine.map(c => c.descriptor));
+    }
     if (r2.ok) renderClips('clips-all',  await r2.json(), true);
   } catch(_) {}
 }

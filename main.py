@@ -890,6 +890,7 @@ async def create_clip(request: Request):
     start_raw = d.get("start", "").strip()
     end_raw = d.get("end", "").strip()
     quality = str(d.get("quality", "1080"))
+    descriptor = str(d.get("descriptor", "")).strip()[:60]
     if not all([url, start_raw, end_raw]):
         raise HTTPException(400, "url, start, and end are required")
     try:
@@ -902,6 +903,7 @@ async def create_clip(request: Request):
             "status": "pending", "pct": 0, "progress": "Queued",
             "created_at": time.time(), "url": url,
             "start_raw": start_raw, "end_raw": end_raw, "owner": username,
+            "descriptor": descriptor,
         }
     threading.Thread(target=_worker, args=(jid, url, start, end, quality), daemon=True).start()
     return {"job_id": jid}
@@ -926,7 +928,7 @@ async def list_clips(request: Request):
     is_admin = _get_role(username) == "admin"
     with _lock:
         return [
-            {"job_id": k, "title": v.get("title"), "start_raw": v.get("start_raw"),
+            {"job_id": k, "title": v.get("title"), "descriptor": v.get("descriptor"), "start_raw": v.get("start_raw"),
              "end_raw": v.get("end_raw"), "url": v.get("url"), "created_at": v["created_at"]}
             for k, v in sorted(jobs.items(), key=lambda x: -x[1]["created_at"])
             if v["status"] == "done" and (
@@ -943,7 +945,7 @@ async def list_all_clips(request: Request):
         display_names = {k: v.get("display_name") or k for k, v in users.items()}
     with _lock:
         return [
-            {"job_id": k, "title": v.get("title"), "start_raw": v.get("start_raw"),
+            {"job_id": k, "title": v.get("title"), "descriptor": v.get("descriptor"), "start_raw": v.get("start_raw"),
              "end_raw": v.get("end_raw"), "url": v.get("url"),
              "created_at": v["created_at"], "owner": v.get("owner") or ADMIN_USER,
              "owner_display": display_names.get(v.get("owner") or ADMIN_USER) or (v.get("owner") or ADMIN_USER)}
@@ -991,7 +993,8 @@ async def download(job_id: str, request: Request):
                 else f"{parts[0]}m{parts[1]}s") if ':' in t else t
 
     title = _slug(j.get('title') or 'clip')
-    dl_name = f"{title}_{_ts(j.get('start_raw',''))}-{_ts(j.get('end_raw',''))}.mp4"
+    desc = _slug(j.get('descriptor') or '')
+    dl_name = f"{title}_{_ts(j.get('start_raw',''))}-{_ts(j.get('end_raw',''))}{'_' + desc if desc else ''}.mp4"
     return FileResponse(str(fp), media_type="video/mp4", filename=dl_name)
 
 
