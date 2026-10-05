@@ -14,11 +14,21 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# YouTube breaks yt-dlp constantly, so refresh it at build time (deploy.sh
+# passes a new YTDLP_REFRESH each run) instead of on every container start.
+ARG YTDLP_REFRESH=0
+RUN pip install --no-cache-dir --upgrade yt-dlp
+
+# uid 1000 matches the owner of ~/docker/yt-clips/clips on the host
+RUN useradd --uid 1000 --create-home app
+
 COPY main.py .
 COPY static/ static/
 
-RUN mkdir -p clips
+RUN mkdir -p clips && chown -R app:app /app
+
+USER app
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "pip install -q --upgrade yt-dlp && uvicorn main:app --host 0.0.0.0 --port 8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

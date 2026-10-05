@@ -27,8 +27,28 @@ users: dict = {}
 _users_lock = threading.Lock()
 
 
-def _hash_pw(username: str, password: str) -> str:
+def _legacy_hash(username: str, password: str) -> str:
     return hashlib.sha256(f"{username}:{password}:yt-clips-pw".encode()).hexdigest()
+
+
+def _hash_pw(username: str, password: str) -> str:
+    salt = os.urandom(16)
+    dk = hashlib.scrypt(password.encode(), salt=salt, n=2 ** 14, r=8, p=1, dklen=32)
+    return f"scrypt${salt.hex()}${dk.hex()}"
+
+
+def _verify_pw(username: str, password: str, stored: str) -> bool:
+    """Checks scrypt hashes, and the old single-round SHA-256 ones until they're upgraded on login."""
+    if not stored:
+        return False
+    if stored.startswith("scrypt$"):
+        try:
+            _, salt, digest = stored.split("$")
+            dk = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), n=2 ** 14, r=8, p=1, dklen=32)
+        except ValueError:
+            return False
+        return _hmac.compare_digest(dk.hex(), digest)
+    return _hmac.compare_digest(_legacy_hash(username, password), stored)
 
 
 def _session_token(username: str, pw_hash: str) -> str:
@@ -62,7 +82,7 @@ def _get_user(request: Request):
         return None
     with _users_lock:
         for uname, data in users.items():
-            if _session_token(uname, data["password_hash"]) == token:
+            if _hmac.compare_digest(_session_token(uname, data["password_hash"]), token):
                 return uname
     return None
 
@@ -263,6 +283,19 @@ _YTDLP_YT_ARGS = [
 ]
 
 
+_YT_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"}
+_TIME_RE = re.compile(r"^\d{1,2}(:\d{1,2}){1,2}$")
+
+
+def _valid_url(url: str) -> bool:
+    """https + YouTube host only: keeps option-looking strings and internal hosts away from yt-dlp."""
+    try:
+        u = urlparse(url)
+    except ValueError:
+        return False
+    return u.scheme == "https" and (u.hostname or "").lower() in _YT_HOSTS and not u.username
+
+
 def _worker(job_id: str, url: str, start: str, end: str, quality: str):
     cmd = [
         "yt-dlp",
@@ -280,14 +313,14 @@ def _worker(job_id: str, url: str, start: str, end: str, quality: str):
         "--merge-output-format", "mp4",
         "--no-playlist",
         "-o", str(CLIPS_DIR / f"{job_id}.%(ext)s"),
-        url,
+        "--", url,
     ]
 
     with _lock:
         jobs[job_id].update(status="running", progress="Fetching info...", pct=0)
 
     try:
-        r = subprocess.run(["yt-dlp", *_YTDLP_YT_ARGS, "--print", "title", "--no-playlist", url],
+        r = subprocess.run(["yt-dlp", *_YTDLP_YT_ARGS, "--print", "title", "--no-playlist", "--", url],
                            capture_output=True, text=True, timeout=20)
         title = r.stdout.strip() if r.returncode == 0 else None
     except Exception:
@@ -873,11 +906,17 @@ async def do_login(request: Request):
     password = data.get("password", "")
     with _users_lock:
         user_data = users.get(username)
-    if not user_data or _hash_pw(username, password) != user_data["password_hash"]:
+    if not user_data or not _verify_pw(username, password, user_data["password_hash"]):
         _rate_record(ip)
         return JSONResponse({"ok": False}, status_code=401)
+    pw_hash = user_data["password_hash"]
+    if not pw_hash.startswith("scrypt$"):
+        pw_hash = _hash_pw(username, password)
+        with _users_lock:
+            users[username]["password_hash"] = pw_hash
+        _save_users()
     r = JSONResponse({"ok": True})
-    r.set_cookie("auth", _session_token(username, user_data["password_hash"]),
+    r.set_cookie("auth", _session_token(username, pw_hash),
                  httponly=True, samesite="lax", max_age=86400 * 30)
     return r
 
@@ -921,6 +960,12 @@ async def create_clip(request: Request):
     descriptor = str(d.get("descriptor", "")).strip()[:60]
     if not all([url, start_raw, end_raw]):
         raise HTTPException(400, "url, start, and end are required")
+    if not _valid_url(url):
+        raise HTTPException(400, "url must be an https YouTube link")
+    if not (_TIME_RE.match(start_raw) and _TIME_RE.match(end_raw)):
+        raise HTTPException(400, "start and end must be MM:SS or HH:MM:SS")
+    if not quality.isdigit():
+        raise HTTPException(400, "bad quality")
     try:
         start, end = hms(start_raw), hms(end_raw)
     except ValueError as e:
@@ -939,11 +984,12 @@ async def create_clip(request: Request):
 
 @app.get("/api/status/{job_id}")
 async def get_status(job_id: str, request: Request):
-    if not _get_user(request):
+    username = _get_user(request)
+    if not username:
         raise HTTPException(401)
     with _lock:
         j = jobs.get(job_id)
-    if not j:
+    if not j or not (j.get("owner") == username or (j.get("owner") is None and _get_role(username) == "admin")):
         raise HTTPException(404)
     return {k: j.get(k) for k in ("status", "pct", "progress", "filename", "error")}
 
@@ -1208,7 +1254,7 @@ async def update_username(request: Request):
         raise HTTPException(400, "username required")
     with _users_lock:
         user_data = dict(users.get(username, {}))
-    if _hash_pw(username, password) != user_data.get("password_hash"):
+    if not _verify_pw(username, password, user_data.get("password_hash", "")):
         return JSONResponse({"ok": False, "error": "wrong password"}, status_code=401)
     if new_username == username:
         return JSONResponse({"ok": True, "username": username})
@@ -1242,7 +1288,7 @@ async def update_password(request: Request):
         raise HTTPException(400, "new_password required")
     with _users_lock:
         user_data = dict(users.get(username, {}))
-    if _hash_pw(username, current_pw) != user_data.get("password_hash"):
+    if not _verify_pw(username, current_pw, user_data.get("password_hash", "")):
         return JSONResponse({"ok": False, "error": "wrong current password"}, status_code=401)
     new_hash = _hash_pw(username, new_pw)
     with _users_lock:
