@@ -21,7 +21,8 @@ Download time-range clips from YouTube VODs in 1080p. Built for pulling volleyba
 - Storage-based retention — configurable cap (default 20 GB); oldest clips purged when limit hit; delete-all button for manual cleanup
 - Video title shown in recent clips list
 - Live encoding progress
-- yt-dlp auto-updates on every container start so YouTube changes don't break it
+- yt-dlp is refreshed on every image build (`deploy.sh` busts the cache) so YouTube changes don't break it
+- **Full VOD API** — `POST /api/vod` downloads a whole video with no cut or re-encode (just a remux); VODs stay out of the clip lists and the storage cap, and are removed with `DELETE /api/vod/{id}`
 
 ## Stack
 
