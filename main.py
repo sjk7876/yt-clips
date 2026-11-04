@@ -311,7 +311,11 @@ def _worker(job_id: str, url: str, start: str | None, end: str | None, quality: 
         "-f", (
             # [protocol=https] keeps us on real DASH and off the throttled
             # HLS/SABR formats yt-dlp would otherwise rank higher.
-            f"bestvideo[height<={quality}][ext=mp4][protocol=https]+bestaudio[ext=m4a][protocol=https]"
+            # A full VOD is kept as downloaded (no re-encode), so ask for H.264 first: yt-dlp otherwise ranks AV1 above
+            # it, and AV1 is harder on players and editors. Falls through to any codec when H.264 isn't offered.
+            ("" if sections else
+             f"bestvideo[height<={quality}][vcodec^=avc1][ext=mp4][protocol=https]+bestaudio[ext=m4a][protocol=https]/")
+            + f"bestvideo[height<={quality}][ext=mp4][protocol=https]+bestaudio[ext=m4a][protocol=https]"
             f"/bestvideo[height<={quality}][protocol=https]+bestaudio[protocol=https]"
             f"/best[height<={quality}][protocol=https]"
             f"/best[height<={quality}]"
