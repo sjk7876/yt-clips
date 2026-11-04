@@ -136,7 +136,10 @@ def _save_settings() -> None:
 
 
 def _storage_bytes() -> int:
-    return sum(f.stat().st_size for f in CLIPS_DIR.glob("*.mp4") if f.exists())
+    """Bytes used by clips. VODs are pulled off the box and deleted by hand, so they don't count toward the cap."""
+    with _lock:
+        vods = {v.get("filename") for v in jobs.values() if v.get("kind") == "vod"}
+    return sum(f.stat().st_size for f in CLIPS_DIR.glob("*.mp4") if f.exists() and f.name not in vods)
 
 
 def _enforce_storage_limit() -> None:
@@ -146,7 +149,8 @@ def _enforce_storage_limit() -> None:
         return
     with _lock:
         candidates = sorted(
-            [(k, v) for k, v in jobs.items() if v["status"] == "done" and v.get("filename")],
+            [(k, v) for k, v in jobs.items()
+             if v["status"] == "done" and v.get("filename") and v.get("kind") != "vod"],
             key=lambda x: x[1]["created_at"]
         )
     for jid, j in candidates:
@@ -296,12 +300,14 @@ def _valid_url(url: str) -> bool:
     return u.scheme == "https" and (u.hostname or "").lower() in _YT_HOSTS and not u.username
 
 
-def _worker(job_id: str, url: str, start: str, end: str, quality: str):
+def _worker(job_id: str, url: str, start: str | None, end: str | None, quality: str):
+    # No start/end = full VOD: skip the section cut and keyframe re-encode, so
+    # yt-dlp just downloads the DASH streams and remuxes them into mp4.
+    sections = ["--download-sections", f"*{start}-{end}", "--force-keyframes-at-cuts"] if start else []
     cmd = [
         "yt-dlp",
         *_YTDLP_YT_ARGS,
-        "--download-sections", f"*{start}-{end}",
-        "--force-keyframes-at-cuts",
+        *sections,
         "-f", (
             # [protocol=https] keeps us on real DASH and off the throttled
             # HLS/SABR formats yt-dlp would otherwise rank higher.
@@ -982,6 +988,53 @@ async def create_clip(request: Request):
     return {"job_id": jid}
 
 
+@app.post("/api/vod")
+async def create_vod(request: Request):
+    """Full-video download: same pipeline as /api/clip minus the cut + re-encode."""
+    username = _get_user(request)
+    if not username:
+        raise HTTPException(401)
+    d = await request.json()
+    url = d.get("url", "").strip()
+    quality = str(d.get("quality", "1080"))
+    descriptor = str(d.get("descriptor", "")).strip()[:60]
+    if not url:
+        raise HTTPException(400, "url is required")
+    if not _valid_url(url):
+        raise HTTPException(400, "url must be an https YouTube link")
+    if not quality.isdigit():
+        raise HTTPException(400, "bad quality")
+    jid = str(uuid.uuid4())
+    with _lock:
+        jobs[jid] = {
+            "status": "pending", "pct": 0, "progress": "Queued",
+            "created_at": time.time(), "url": url, "kind": "vod",
+            "start_raw": None, "end_raw": None, "owner": username,
+            "descriptor": descriptor,
+        }
+    threading.Thread(target=_worker, args=(jid, url, None, None, quality), daemon=True).start()
+    return {"job_id": jid}
+
+
+@app.delete("/api/vod/{job_id}")
+async def delete_vod(job_id: str, request: Request):
+    """Called once the VOD has been pulled off the box."""
+    username = _get_user(request)
+    if not username:
+        raise HTTPException(401)
+    with _lock:
+        j = jobs.get(job_id)
+        if not j or j.get("kind") != "vod" or j.get("owner") != username:
+            raise HTTPException(404)
+        if j["status"] in ("pending", "running"):
+            raise HTTPException(409, "vod is still downloading")
+        del jobs[job_id]
+    if j.get("filename"):
+        (CLIPS_DIR / j["filename"]).unlink(missing_ok=True)
+    _save_jobs()
+    return {"ok": True}
+
+
 @app.get("/api/status/{job_id}")
 async def get_status(job_id: str, request: Request):
     username = _get_user(request)
@@ -1025,6 +1078,8 @@ def _clip_filter(video, since, until):
     hi = _day_start(until) + 86400 if until else None
 
     def ok(v) -> bool:
+        if v.get("kind") == "vod":  # full VODs live outside the clip lists
+            return False
         if vid and _video_id(v.get("url") or "") != vid:
             return False
         if lo is not None and v["created_at"] < lo:
@@ -1080,8 +1135,8 @@ async def clear_clips(request: Request):
         raise HTTPException(401)
     is_admin = _get_role(username) == "admin"
     with _lock:
-        to_del = [k for k, v in jobs.items()
-                  if v.get("owner") == username or (is_admin and v.get("owner") is None)]
+        to_del = [k for k, v in jobs.items() if v.get("kind") != "vod" and (
+                  v.get("owner") == username or (is_admin and v.get("owner") is None))]
         filenames = [jobs[k].get("filename") for k in to_del if jobs[k].get("filename")]
         for k in to_del:
             del jobs[k]
@@ -1099,7 +1154,7 @@ async def delete_clip(job_id: str, request: Request):
     is_admin = _get_role(username) == "admin"
     with _lock:
         j = jobs.get(job_id)
-        if not j or not (j.get("owner") == username or (is_admin and j.get("owner") is None)):
+        if not j or j.get("kind") == "vod" or not (j.get("owner") == username or (is_admin and j.get("owner") is None)):
             raise HTTPException(404)
         del jobs[job_id]
     if j.get("filename"):
@@ -1130,7 +1185,8 @@ async def download(job_id: str, request: Request):
 
     title = _slug(j.get('title') or 'clip')
     desc = _slug(j.get('descriptor') or '')
-    dl_name = f"{title}_{_ts(j.get('start_raw',''))}-{_ts(j.get('end_raw',''))}{'_' + desc if desc else ''}.mp4"
+    span = f"_{_ts(j['start_raw'])}-{_ts(j['end_raw'])}" if j.get('start_raw') else ""
+    dl_name = f"{title}{span}{'_' + desc if desc else ''}.mp4"
     return FileResponse(str(fp), media_type="video/mp4", filename=dl_name)
 
 
@@ -1143,7 +1199,7 @@ async def admin_storage(request: Request):
     used = _storage_bytes()
     limit = int(settings.get("storage_limit_gb", 20) * 1024 ** 3)
     with _lock:
-        clip_count = sum(1 for v in jobs.values() if v["status"] == "done")
+        clip_count = sum(1 for v in jobs.values() if v["status"] == "done" and v.get("kind") != "vod")
     return {
         "used_bytes": used,
         "limit_bytes": limit,
