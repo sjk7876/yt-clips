@@ -12,7 +12,7 @@ FastAPI app that downloads time-range clips (and, for another project, full VODs
 
 **Always deploy with `./deploy.sh`.** It's gitignored, so `git ls-files` won't show it. Don't hand-roll scp + `docker compose`: the script also rebuilds with a fresh yt-dlp (`YTDLP_REFRESH`), chowns `clips/` to uid 1000, makes sure `bgutil-provider` is up, and force-recreates the container.
 
-The server copy at `server:/home/spenc/docker/yt-clips` is plain copied files, not a git checkout. The compose service lives in `/home/spenc/docker/services/docker-compose.yml`.
+**Never edit files on the server directly.** Change them here, commit, then `./deploy.sh`. The server copy at `server:/home/spenc/docker/yt-clips` is plain copied files, not a git checkout, so any edit made there never reaches git and gets silently overwritten by the next deploy. The compose service lives in `/home/spenc/docker/services/docker-compose.yml`.
 
 ## Local dev
 
